@@ -43,7 +43,7 @@ export abstract class PlatformIntegration {
   abstract quitBrowser(): Promise<void>
 
   protected async clickElementWithContent(expression: string) {
-    const [node] = await this.page.$x(expression)
+    const node = await this.page.waitForSelector('//xpath' + expression)
 
     if (node) {
       const button = node as unknown as ElementHandle<Element>

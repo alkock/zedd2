@@ -14,14 +14,6 @@ async function genIcon(name: string, svg: (res: number) => React.ReactElement) {
     const svgString = ReactDOMServer.renderToStaticMarkup(svg(res))
     const svgFile = `./icons/${name}_${res}.svg`
     await fsp.writeFile(svgFile, svgString, 'utf8')
-    // await icongen(svgFile, './icons', {
-    //   report: true,
-    //   ico: {
-    //     name,
-    //     // sizes: [16, 24, 32, 48, 64, 128, 256],
-    //     sizes: [24],
-    //   },
-    // })
     await convertFile(svgFile, {
       outputFilePath: `./icons/${name}_${res}.png`,
     })

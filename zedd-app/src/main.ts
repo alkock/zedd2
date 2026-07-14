@@ -58,13 +58,7 @@ const createWindow = () => {
 
   mainWindow.loadURL(MAIN_WINDOW_WEBPACK_ENTRY)
 
-  if (global.isDev) {
-    // Open the DevTools.
-    mainWindow.webContents.openDevTools()
-  }
 
-  // This must be done here, because registered callbacks in the renderer
-  // process are async and preventDefault is ignored
   mainWindow.on('close', (e) => {
     if (!userQuit) {
       e.preventDefault()

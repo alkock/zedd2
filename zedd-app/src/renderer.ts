@@ -49,22 +49,6 @@ const d = (...x: any[]) => console.log('renderer.ts', ...x)
 
 const isWin = process.platform === 'win32'
 
-// class Todo {
-//   name: string
-// }
-
-// createModelSchema(Todo, {
-//   title: optional(primitive()),
-//   user: optional(
-//     custom(
-//       (value) => value.name,
-//       () => SKIP,
-//     ),
-//   ),
-// })
-
-// serialize(new Todo()) // {}
-
 function showNotification(title: string, text: string, cb: () => void) {
   const notification = new Notification(title, {
     body: text,
@@ -112,13 +96,13 @@ const getMenuItems = (state: AppState) => [
     click: () => shell.showItemInFolder(userConfigFile),
   },
   { label: 'Edit Settings', click: () => (state.settingsDialogOpen = true) },
-  { label: 'Github', click: () => shell.openExternal('https://github.com/tobka777/zedd2') },
   { label: 'Open Dev', click: () => getCurrentWindow().webContents.openDevTools() },
   { label: 'Reload Config', click: () => getCurrentWindow().reload() },
   { label: 'Quit', click: () => quit() },
 ]
 
 async function setup() {
+  console.log('SETUP')
   await mkdirIfNotExists(saveDir)
 
   const platformState = new PlatformState(platformDir)
@@ -193,29 +177,6 @@ async function setup() {
           state.changingSliceTask = newSlice
         }
       },
-      // code for interactive notification. Disabled because it only works with a native module
-      // which isn't worth the hassle.
-      //   [state.currentTask.name.substring(0), formatInterval(when) + ' ' + state.currentTask.name],
-      //   ['Other...', formatInterval(when) + ' ' + '$$$OTHER$$$'],
-      //   (_, wargs) => {
-      //     const [start, end, taskName] = TimeSlice.parse(wargs.arguments)
-      //     const newSlice = new TimeSlice(
-      //       start,
-      //       end,
-      //       '$$$OTHER$$$' === taskName ? state.getUndefinedTask() : state.getTaskForName(taskName),
-      //     )
-      //     state.addSlice(newSlice)
-      //     if ('$$$OTHER$$$' === taskName) {
-      //       if (!currentWindow.isVisible()) {
-      //         currentWindow.show()
-      //       }
-      //       if (state.hoverMode) {
-      //         state.hoverMode = false
-      //       }
-      //       currentWindow.focus()
-      //       state.changingSliceTask = newSlice
-      //     }
-      //   },
     )
   }
 
@@ -319,17 +280,18 @@ async function setup() {
   const restoreUnmaximizedBoundsIfNotHoverMode = () =>
     !state.hoverMode && setBoundsSafe(currentWindow, state.bounds.normal)
 
-  const saveWindowBounds = ({ sender }: { sender: BrowserWindow }) => {
+  const saveWindowBounds = () => {
     if (state && !state.hoverMode) {
-      if (sender.isMaximized()) {
+      if (currentWindow.isMaximized()) {
         state.bounds.maximized = true
       } else {
         state.bounds.maximized = false
-        state.bounds.normal = sender.getBounds()
+        state.bounds.normal = currentWindow.getBounds()
       }
     }
+
     if (state && state.hoverMode) {
-      state.bounds.hover = sender.getBounds()
+      state.bounds.hover = currentWindow.getBounds()
     }
   }
 
@@ -436,10 +398,17 @@ async function setup() {
     document.title = workedTime + ' ' + timingInfo
   })
 
-  currentWindowEvents.push(
-    ['blur', () => (state.windowFocused = false)],
-    ['focus', () => (state.windowFocused = true)],
-  )
+  const focusHandler = () => {
+    console.log('focus')
+    state.windowFocused = true
+  }
+
+  const blurHandler = () => {
+    console.log('blur')
+    state.windowFocused = false
+  }
+
+  currentWindowEvents.push(['focus', focusHandler], ['blur', blurHandler])
 
   autorun(
     () => {
@@ -498,6 +467,7 @@ async function setup() {
   return {
     cleanup: (cleanup = () => {
       console.log('setup().cleanup')
+      console.log('CLEANUP')
       clearInterval(saveInterval)
       clearInterval(lastActionInterval)
       cleanupSetStateLinks()
@@ -546,6 +516,11 @@ if (module.hot) {
   module.hot.accept('./components/AppGui', () => {
     renderDOM()
   })
-  module.hot.dispose(() => cleanup())
+
+  module.hot.dispose(() => {
+    console.log('HMR dispose')
+    cleanup()
+  })
+
   module.hot.accept()
 }

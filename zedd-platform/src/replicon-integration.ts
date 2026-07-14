@@ -81,9 +81,12 @@ export class RepliconIntegration extends PlatformIntegration {
     await this.goToTheTimesheet(true)
 
     await this.addRow()
-    await this.page.waitForTimeout(300)
+    await this.sleep(0.3)
 
-    const [activitySelectNode] = await this.page.$x("//a[contains(., 'Select an Activity')]")
+    const activitySelectNode = await this.page.waitForSelector(
+      "xpath//a[contains(., 'Select an Activity')]",
+    )
+
     let activitySelect = activitySelectNode as unknown as ElementHandle<Element>
     if (activitySelect) {
       await activitySelect?.click()
@@ -166,7 +169,7 @@ export class RepliconIntegration extends PlatformIntegration {
           let taskSearchButton = null
           if (!row) {
             await this.addRow()
-            await this.page.waitForTimeout(300)
+            await this.sleep(0.3)
             taskSearchButton = await this.clickElementWithContent(
               '//td[.//span[contains(@class, "taskSelectorSearchByCategoryContainer")]//span[contains(@class, "placeholder") and contains(text(), "Select Project")]]',
             )
@@ -183,15 +186,15 @@ export class RepliconIntegration extends PlatformIntegration {
   }
 
   private async addRow() {
-    const prevRows = await this.page.$x('//tbody[@sectiontype="rows"]/tr')
+    const prevCount = await this.page.$$eval('tbody[sectiontype="rows"] tr', (rows) => rows.length)
 
     await this.page.click('table.dataGrid > tbody[sectiontype="actions"] a#add-new-timeline')
 
     await this.page.waitForFunction(
       (selector, count) => document.querySelectorAll(selector).length > count,
-      { timeout: 5000 },
+      {},
       'tbody[sectiontype="rows"] tr',
-      prevRows.length,
+      prevCount,
     )
   }
 
@@ -220,8 +223,7 @@ export class RepliconIntegration extends PlatformIntegration {
   }
 
   private async clickSearchByCategory() {
-    const nodes = await this.page.$x("//span[text()='Search By Category']")
-
+    const nodes = await this.page.$$("xpath//span[text()='Search By Category']")
     for (let i = 0; i < nodes.length; i++) {
       const button = nodes[i] as unknown as ElementHandle<Element>
 
@@ -278,7 +280,7 @@ export class RepliconIntegration extends PlatformIntegration {
         throw new Error(`Timed out waiting for URL to contain: ${searchedPartInLink}`)
       }
 
-      await this.page.waitForTimeout(300)
+      await this.sleep(0.3)
     }
   }
 
@@ -393,8 +395,7 @@ export class RepliconIntegration extends PlatformIntegration {
   }
 
   private async selectElementWithContent(expression: string, option: string) {
-    const [node] = await this.page.$x(expression)
-
+    const node = await this.page.waitForSelector(`xpath=${expression}`)
     if (node) {
       const button = node as unknown as ElementHandle<Element>
       await button.select(option)
@@ -412,17 +413,20 @@ export class RepliconIntegration extends PlatformIntegration {
   ) {
     row = await this.chooseTaskFromDropdown(row, taskSearchButton, work)
 
-    const [activitySelectNode] = await row.$x(".//a[contains(., 'Select an Activity')]")
-    const activitySelect = activitySelectNode as unknown as ElementHandle<Element>
+    const activitySelect = await row.$("xpath=.//a[contains(., 'Select an Activity')]")
+
     if (activitySelect) {
       await activitySelect.click()
 
-      await this.page.waitForXPath(
-        "//ul[contains(@class, 'divDropdownList')]//a[contains(text(), '" +
+      await this.page.waitForSelector(
+        `xpath/${
+          "//ul[contains(@class, 'divDropdownList')]//a[contains(text(), '" +
           work.taskActivity +
-          "')]",
+          "')]"
+        }`,
         { visible: true },
       )
+
       await this.clickElementWithContent(
         "//ul[contains(@class, 'divDropdownList')]//a[contains(text(), '" +
           work.taskActivity +
@@ -514,8 +518,7 @@ export class RepliconIntegration extends PlatformIntegration {
       day: 'numeric',
     })
     const [weekday, day] = formattedTaskDay.replace(',', '').split(' ')
-
-    const days = await row.$x('//td[contains(@class,"day")]/input')
+    const days = await row.$$('xpath//td[contains(@class,"day")]/input')
     let dayFieldNode = null
 
     for (let dayNode of days) {
@@ -546,7 +549,7 @@ export class RepliconIntegration extends PlatformIntegration {
   }
 
   private async getRowTaskFromTable(work: WorkEntry) {
-    const rows = await this.page.$x('//tbody[@sectiontype="rows"]/tr')
+    const rows = await this.page.$$('xpath//tbody[@sectiontype="rows"]/tr')
     for (const rowNode of rows) {
       const row = rowNode as ElementHandle<Element>
       const taskCell = await row.$('.timesheetTaskNameFormat')
@@ -605,7 +608,7 @@ export class RepliconIntegration extends PlatformIntegration {
   private async reopenTimesheet() {
     const reopenButton = await this.clickElementWithContent('//input[@value="Reopen"]')
     if (reopenButton) {
-      await this.page.waitForXPath('//h1[text()="Reopen Timesheet"]')
+      await this.page.waitForSelector('xpath/${//h1[text()="Reopen Timesheet"]}')
       const confirmReopenButton = await this.page.waitForSelector(
         'div.buttonRow > input.important[value="Reopen"]',
       )
@@ -633,8 +636,8 @@ export class RepliconIntegration extends PlatformIntegration {
         "//button[contains(text(), 'Submit for Approval')]",
       )
       if (submit) {
-        await this.page.waitForXPath(
-          "//span[contains(@class, 'statusSubmitting')]/span[contains(@class, 'statusName') and contains(text(), 'Submitting')]",
+        await this.page.waitForSelector(
+          "xpath/${//span[contains(@class, 'statusSubmitting')]/span[contains(@class, 'statusName') and contains(text(), 'Submitting')]}",
           {
             hidden: true,
           },
@@ -644,14 +647,20 @@ export class RepliconIntegration extends PlatformIntegration {
           "//button[contains(text(), 'Resubmit for Approval')]",
         )
         if (resubmit) {
-          await this.page.waitForXPath("//div[contains(@aria-label, 'Resubmit Timesheet')]")
+          await this.page.waitForSelector(
+            "xpath/${//div[contains(@aria-label, 'Resubmit Timesheet')]}",
+          )
           let confirmResubmitButton = await this.page.waitForSelector(
             'input[value^="Resubmit for Approval"]',
           )
           await confirmResubmitButton?.click()
-          await this.page.waitForXPath("//div[contains(@aria-label, 'Resubmit Timesheet')]", {
-            hidden: true,
-          })
+
+          await this.page.waitForSelector(
+            "xpath/${//div[contains(@aria-label, 'Resubmit Timesheet')]}",
+            {
+              hidden: true,
+            },
+          )
         }
       }
     }

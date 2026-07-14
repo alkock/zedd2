@@ -18,9 +18,6 @@ The goal is to make work planning more organized, stress-free and user-friendly.
 - Forecast booking possible with "Ersatz" task
 - Automatic detection of holidays by country and federal state
 
-## Screenshots 📺
-
-![Screenshot](screenshots/screenshot.png)
 
 ## Usage 🔥
 
@@ -95,3 +92,14 @@ If you want to contribute please read our [Contribution Guide](https://github.co
 
 Contact person: [tobka777](https://github.com/tobka777)
 
+cd zedd
+
+cd zedd-platform
+npm install
+npm run build
+
+cd ..
+
+cd zedd-app
+npm install
+npm run start

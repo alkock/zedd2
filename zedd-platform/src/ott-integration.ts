@@ -20,7 +20,7 @@ export class OTTIntegration extends PlatformIntegration {
 
     await this.page.setRequestInterception(true)
 
-    const [dropdownNode] = await this.page.$x(
+    const dropdownNode = await this.page.waitForSelector(
       "//div[@role='button' and contains(text(), 'Started & ended in selected period')]",
     )
 
@@ -169,15 +169,15 @@ export class OTTIntegration extends PlatformIntegration {
   private async addNewTask(work: WorkEntry, startWeek: Date, taskDay: Date) {
     if (work.platformType === 'REPLICON') return
     let addNewTaskInput = await this.page.waitForSelector("input[placeholder*='Search task']")
-    const [clearButton] = await this.page.$x(
+    const clearButton = await this.page.waitForSelector(
       "//input[contains(@placeholder, 'Search task')]/../div/button[contains(@title, 'Clear')]",
     )
     await (clearButton as ElementHandle<Element>)!.click()
 
     await addNewTaskInput!.type(String(work.taskName))
 
-    let rowWithSearchedTaskNode = await this.page.waitForXPath(
-      "//tr[.//div[text()='" + work.taskName + "']]",
+    let rowWithSearchedTaskNode = await this.page.waitForSelector(
+      `xpath=//tr[.//div[text()='${work.taskName}']]`,
     )
 
     if (!rowWithSearchedTaskNode) {
@@ -196,9 +196,10 @@ export class OTTIntegration extends PlatformIntegration {
 
   private async clickAllAssigned(value: string = 'All') {
     await this.sleep(2)
-    const [issueFilterElement] = (await this.page.$x(
+
+    const issueFilterElement = (await this.page.waitForSelector(
       "//*[contains(text(), 'Issue Filter')]/../../div/div[@role='button']",
-    )) as [ElementHandle<Element>]
+    )) as ElementHandle<Element>
 
     if (issueFilterElement) {
       await issueFilterElement.click()
@@ -212,10 +213,17 @@ export class OTTIntegration extends PlatformIntegration {
   }
 
   private async clickAllEngagements() {
-    const [engagementElement] = await this.page.$x("//*[text() = 'Engagement']")
+    const engagementElement = await this.page.waitForSelector(
+      "::-p-xpath(//*[text() = 'Engagement'])",
+    )
+
+    if (!engagementElement) {
+      throw new Error('Engagement-Element nicht gefunden.')
+    }
 
     const engagementSelect = (await engagementElement.evaluateHandle((el) => {
       let parent: Element | null = el as unknown as Element
+
       while (parent) {
         const buttonDiv = parent.querySelector('div[role="button"]')
         if (buttonDiv) {
@@ -223,15 +231,17 @@ export class OTTIntegration extends PlatformIntegration {
         }
         parent = parent.parentElement
       }
+
       return null
     })) as ElementHandle<Element>
 
     if (engagementSelect) {
       await engagementSelect.click()
+
       const dropdownOptions = await this.page.waitForSelector('ul[role="listbox"]')
 
       const allAssigned = await dropdownOptions?.waitForSelector('li[title="All"]')
-      await allAssigned!.click()
+      await allAssigned?.click()
 
       await this.page.waitForSelector('[role="table"]')
     }
@@ -308,8 +318,8 @@ export class OTTIntegration extends PlatformIntegration {
   }
 
   private async checkFinilisedButton(timerange: string) {
-    const finaliseBtnHandleNode = await this.page.waitForXPath(
-      "//button[.//span[contains(text(), 'Finalize')]]",
+    const finaliseBtnHandleNode = await this.page.waitForSelector(
+      "xpath=//button[.//span[contains(text(), 'Finalize')]]",
     )
     const finaliseBtnHandle = finaliseBtnHandleNode as unknown as HTMLButtonElement
     const isDisabled = await this.page.evaluate((el) => el.disabled, finaliseBtnHandle)
@@ -337,20 +347,19 @@ export class OTTIntegration extends PlatformIntegration {
 
     await this.page.mouse.click(0, 0)
 
-    let [rowWithSearchedTaskNodeUpdated] = await this.page.$x(
+    let rowWithSearchedTaskNodeUpdated = await this.page.waitForSelector(
       "//tr[.//div[text()='" + work.taskName + "']]",
     )
 
     let comment = work.comment
 
-    if (comment) {
+    if (comment && rowWithSearchedTaskNodeUpdated) {
       const commentTextBox = await rowWithSearchedTaskNodeUpdated.waitForSelector(
         'textarea[placeholder="Comment"]',
       )
+
       await this.fillTextarea(commentTextBox, String(comment))
-      //await commentTextBox?.type(String(comment)) // instabil bei längeren Kommentaren
     }
-    await dayInHeader?.click()
   }
 
   /**
@@ -392,11 +401,15 @@ export class OTTIntegration extends PlatformIntegration {
   private async finaliseTimesheet(submitTimesheets: boolean) {
     if (submitTimesheets) {
       await this.clickElementWithContent("//button[.//span[contains(text(), 'Finalise')]]")
-      await this.page.waitForXPath("//div[contains(text(), 'FINALISING YOUR TIMESHEET')]")
+      await this.page.waitForSelector("xpath///div[contains(text(), 'FINALISING YOUR TIMESHEET')]")
+
       await this.clickElementWithContent("//button[.//span[text()='Yes, Continue']]")
-      await this.page.waitForXPath("//div[contains(text(), 'FINALISING YOUR TIMESHEET')]", {
-        hidden: true,
-      })
+      await this.page.waitForSelector(
+        "xpath///div[contains(text(), 'FINALISING YOUR TIMESHEET')]",
+        {
+          hidden: true,
+        },
+      )
     }
   }
 

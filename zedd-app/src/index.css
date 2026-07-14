@@ -9,15 +9,6 @@ body {
   display: flex;
   flex-direction: column;
 }
-/* 
-div:focus {
-  box-shadow: 0 0 10px blue; */
-/* outline-width: 0px 10px 0px 10px; */
-/* outline-style: solid; */
-/* outline-color: red; */
-/* outline: 0;
-  z-index: 1000;
-} */
 
 .block-handle {
   position: absolute;

@@ -360,38 +360,5 @@ describe('AppState', () => {
         await AppState.loadFromJsonString(fs.readFileSync(path.join(dir, f), 'utf8'))
       }
     })
-
-    // it('is possible to switch task while in an existing slice', () => {
-    //   addSlice('2020-01-01 11:00 - 2020-01-01 12:00 daily')
-
-    //   startTiming('rebasing')
-    //   waitUntil('11:30')
-
-    //   startTiming('rebasing')
-    //   waitUntil('12:00')
-
-    //   assert.equal(state.currentTask.name, 'rebasing', 'current task name')
-    //   checkSlices(
-    //     '2020-01-01 10:00 - 2020-01-01 11:00 rebasing',
-    //     '2020-01-01 11:00 - 2020-01-01 11:30 daily',
-    //     '2020-01-01 11:30 - 2020-01-01 12:00 rebasing',
-    //   )
-    // })
-
-    // it.only('', () => {
-    //   addSlice('2020-01-01 11:00 - 2020-01-01 12:00 daily')
-
-    //   startTiming('rebasing')
-    //   leave()
-
-    //   waitUntil('11:30')
-    //   comeBack()
-
-    //   assert.equal(state.currentTask.name, 'daily', 'current task name')
-    //   checkSlices(
-    //     '2020-01-01 10:00 - 2020-01-01 11:00 rebasing',
-    //     '2020-01-01 11:00 - 2020-01-01 12:00 daily',
-    //   )
-    // })
   })
 })
