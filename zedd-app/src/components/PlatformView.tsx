@@ -11,7 +11,6 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableContainer,
   TableHead,
   TableRow,
   TextField,
@@ -342,9 +341,7 @@ export const PlatformView = observer((props: PlatformViewProps) => {
     (x) => x.taskName,
   ).filter((taskToShow) => isTaskVisible(taskToShow))
   const theme = useTheme()
-  const classes = useClasses(styles)
   const showingTotal = sum(allWorkEntries.map((we) => we.hours))
-
   const projectTasksViewItems: PlatformExportFormat = {}
   const ottTaskMissingRepliconTask: WorkEntry[] = []
   for (const w of intervals) {
