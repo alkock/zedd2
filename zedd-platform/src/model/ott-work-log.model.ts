@@ -1,44 +1,70 @@
-// Is the raw, unmapped return type from OTT. 
- 
- interface OttWorkLogResponse {
-    data: OttWorkLogData[]
-  }
+// Is the raw, unmapped return type from OTT.
 
-  interface OttWorkLogData {
-    assignedIssues: OttAssignedIssue[]        //  Tasks
-    assoBoardProjectCodes: OttProjectCode[]    // Join-Tabelle
-    timeEntries: OttTimeEntry[]               //  später für Export
-  }
+interface OttWorkLogResponse {
+  data: OttWorkLogData[]
+}
 
-  interface OttAssignedIssue {
-    title: string
-    appointmentId: number
-    projectCode: number      // Join-Key zu projectCodeId
-    engagementId: number     // Relevant für Export
-    stickyNoteId: number     // Relevant für Export
-  }
+interface OttWorkLogData {
+  assignedIssues: OttAssignedIssue[] 
+  assoBoardProjectCodes: OttProjectCode[] 
+  timeEntries: OttTimeEntry[] 
+}
 
-  interface OttProjectCode {
-    projectCodeId: number
-    gfsProjectCode: number   //  projectIntId
-    gtmProjectName: string   //  projectName
-    gfsTaskCode: string      //  taskCode
-    boardId?: number         // Relevant für Export
-  }
+interface OttAssignedIssue {
+  title: string
+  appointmentId: number
+  projectCode: number 
+  engagementId: number 
+  stickyNoteId: number
+}
 
-  interface OttTimeEntry {
-    id: number                 // vorhanden bei bestehenden Einträgen (Update-Zweig)
-    appointmentId: number
-    dateLogged: number         // 20260316
-    hoursLogged: number
-    stickyNoteId: number
-    engagementId: number
-    boardId: number
-    loggedFor: number
-    trackingType: number
-    issueName: string
-    description: string
-    workLocationId?: number
-    workPlaceId?: number
-  }
+interface OttProjectCode {
+  projectCodeId: number
+  gfsProjectCode: number
+  gtmProjectName: string 
+  gfsTaskCode: string
+  boardId?: number
+}
 
+interface OttTimeEntry {
+  id: number
+  appointmentId: number
+  dateLogged: number 
+  hoursLogged: number
+  stickyNoteId: number
+  engagementId: number
+  boardId: number
+  loggedFor: number
+  trackingType: number
+  issueName: string
+  description: string
+  workLocationId?: number
+  workPlaceId?: number
+}
+
+
+interface OttDeleteTimeEntry {
+  id: number
+  appointmentId: number
+  stickyNoteId: number
+  dateLogged: number
+  hoursLogged: number
+  description: string
+  loggedFor: number
+  trackingType: number
+  boardId: number
+  engagementId: number
+  originalValues: {
+    'Issue Name': string
+    'Issue Id': number
+    Date: number
+    Duration: number
+    Description: string
+    'Logged For': number
+    'Work Location': number
+    'Place of Work': number
+  }
+  workLocationId: number
+  workPlaceId: number
+  reason: string
+}

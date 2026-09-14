@@ -3,7 +3,15 @@ import { PlatformOptions } from './model/platform.options.model'
 import { PlatformIntegration } from './platform-integration'
 
 import { magicToken, getCurrentMonthDatePath } from './utils'
-import { endOfMonth, format, min as dateMin, parseISO, startOfMonth } from 'date-fns'
+import {
+  eachDayOfInterval,
+  endOfMonth,
+  format,
+  max as dateMax,
+  min as dateMin,
+  parseISO,
+  startOfMonth,
+} from 'date-fns'
 export class OTTIntegrationNew extends PlatformIntegration {
   private authorizationHeader?: string
   private username?: string
@@ -30,33 +38,14 @@ export class OTTIntegrationNew extends PlatformIntegration {
   override async importTasks(notifyTasks?: (p: Task[]) => void): Promise<Task[]> {
     console.log('[OTT] importTasks started; platformLink:', this.platformLink)
     await this.init()
-    // The auth header travels on OTT's own XHRs. init() already ran page.goto()
-    // before we could listen, so those requests are missed. Reload re-fires them
-    // while the capture listener is attached, so authorizationHeader is captured.
     this.attachAuthCapture()
-    console.log('[OTT] reloading page to capture auth header...')
     await this.page.reload()
     await this.page.waitForSelector('[role="table"]')
-    console.log('[OTT] table ready; auth header captured:', this.authorizationHeader ? 'yes' : 'NO')
     const username = await this.fetchUsernameandId()
-    console.log(
-      '[OTT] auth header:',
-      this.authorizationHeader ? 'captured' : 'MISSING',
-      '| username:',
-      username,
-    )
     const currentMonthDatePath = getCurrentMonthDatePath()
     const workLogData = await this.getWorkLogData(magicToken(username), currentMonthDatePath)
-    console.log(
-      '[OTT] datePath:',
-      currentMonthDatePath,
-      '| assignedIssues:',
-      workLogData?.assignedIssues?.length,
-      '| assoBoardProjectCodes:',
-      workLogData?.assoBoardProjectCodes?.length,
-    )
+
     const tasks = this.mapWorkLogDataToTasks(workLogData)
-    console.log('[OTT] mapped tasks:', tasks.length)
     notifyTasks && notifyTasks(tasks)
     return tasks
   }
@@ -226,6 +215,20 @@ export class OTTIntegrationNew extends PlatformIntegration {
       workLogData.timeEntries.map((te) => [`${te.appointmentId}-${te.dateLogged}`, te]),
     )
 
+    const parsedDays = days.map((day) => parseISO(day))
+    const exportDays = new Set(
+      eachDayOfInterval({ start: dateMin(parsedDays), end: dateMax(parsedDays) }).map((d) =>
+        Number(format(d, 'yyyyMMdd')),
+      ),
+    )
+    const desiredKeys = new Set<string>()
+    for (const [day, entries] of Object.entries(data)) {
+      const dateLogged = Number(day.replace(/-/g, ''))
+      for (const we of entries) {
+        desiredKeys.add(`${we.taskIntId}-${dateLogged}`)
+      }
+    }
+
     for (const [day, entries] of Object.entries(data)) {
       const dateLogged = Number(day.replace(/-/g, ''))
       if (Number.isNaN(dateLogged)) {
@@ -333,6 +336,69 @@ export class OTTIntegrationNew extends PlatformIntegration {
         }
       }
     }
+    await this.deleteStaleTimeEntries(workLogData, exportDays, desiredKeys)
+  }
+  /**
+   *
+   * @param workLogData - der vom OTT gelieferte Bestand (Quelle der zu räumenden Einträge)
+   * @param exportDays - der exportierte Tagbereich (leere Tage eingeschlossen)
+   * @param desiredKeys - die (taskIntId,Tag)-Kombis, die in Zedd bleiben sollen
+   */
+  private async deleteStaleTimeEntries(
+    workLogData: OttWorkLogData,
+    exportDays: Set<number>,
+    desiredKeys: Set<string>,
+  ): Promise<void> {
+    const toDelete: OttDeleteTimeEntry[] = []
+    for (const te of workLogData.timeEntries) {
+      if (!exportDays.has(Number(te.dateLogged))) continue
+      const key = `${te.appointmentId}-${Number(te.dateLogged)}`
+      if (desiredKeys.has(key)) continue
+      if (Number(te.hoursLogged) === 0) continue
+      const dateLogged = Number(te.dateLogged)
+      const hoursLogged = Number(te.hoursLogged)
+      const loggedFor = Number(te.loggedFor) || Number(this.userId)
+      toDelete.push({
+        id: Number(te.id),
+        appointmentId: Number(te.appointmentId),
+        stickyNoteId: Number(te.stickyNoteId),
+        dateLogged,
+        hoursLogged,
+        description: te.description ?? '',
+        loggedFor,
+        trackingType: Number(te.trackingType),
+        boardId: Number(te.boardId),
+        engagementId: Number(te.engagementId),
+        // "Issue Id" ist die stickyNoteId (siehe OTT-Referenz-Payload).
+        originalValues: {
+          'Issue Name': te.issueName,
+          'Issue Id': Number(te.stickyNoteId),
+          Date: dateLogged,
+          Duration: hoursLogged,
+          Description: te.description ?? '',
+          'Logged For': loggedFor,
+          'Work Location': this.WORK_LOCATION_ID,
+          'Place of Work': this.WORK_PLACE_ID,
+        },
+        workLocationId: this.WORK_LOCATION_ID,
+        workPlaceId: this.WORK_PLACE_ID,
+        reason: 'Time booking adjustment.',
+      })
+      console.log(
+        `[OTT] Reconciliation: lösche ${te.issueName} (${te.appointmentId}) am ${te.dateLogged}, ` +
+          `${te.hoursLogged}h (nicht mehr in Zedd).`,
+      )
+    }
+    if (toDelete.length === 0) return
+    console.log(
+      `[OTT] Reconciliation: lösche insgesamt ${toDelete.length} verwaiste(n) OTT-Eintrag(e).`,
+    )
+    const response = await this.deleteJson('/lean/wsr/protected/ott/deleteTimeEntry', toDelete)
+    if (response?.status !== '0') {
+      throw new Error(
+        `OTT Reconciliation (deleteTimeEntry) fehlgeschlagen: ${JSON.stringify(response)}`,
+      )
+    }
   }
 
   private async postJson(
@@ -351,6 +417,43 @@ export class OTTIntegrationNew extends PlatformIntegration {
           body: JSON.stringify(body),
         })
         return response.json()
+      },
+      { path, auth: this.authorizationHeader, body },
+    )
+  }
+
+  /**
+   * DELETE mit JSON-Array-Body. OTT löscht TimeEntries über
+   * /ott/deleteTimeEntry (DELETE, Body = Array der zu löschenden Einträge inkl.
+   * originalValues + reason). Unterscheidet sich von postJson nur durch die
+   * Methode; der Authorization-Header kommt aus demselben Captured-Request.
+   */
+  private async deleteJson(
+    path: string,
+    body: unknown,
+  ): Promise<{ status?: string; message?: string }> {
+    if (!this.authorizationHeader) {
+      throw new Error('No authorization header captured')
+    }
+    return this.page.evaluate(
+      async ({ path, auth, body }) => {
+        const response = await fetch(path, {
+          method: 'DELETE',
+          headers: { authorization: auth, 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify(body),
+        })
+        // deleteTimeEntry kann leer (204) antworten statt {status:'0'} —
+        // leere/JSON-lose Antwort ist bei 2xx ein Erfolg.
+        const text = await response.text()
+        if (!text) {
+          return { status: response.ok ? '0' : String(response.status), message: '' }
+        }
+        try {
+          return JSON.parse(text)
+        } catch {
+          return { status: response.ok ? '0' : String(response.status), message: text }
+        }
       },
       { path, auth: this.authorizationHeader, body },
     )
