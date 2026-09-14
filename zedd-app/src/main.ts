@@ -1,6 +1,19 @@
 import * as remoteMain from '@electron/remote/main'
 import { app, BrowserWindow, ipcMain, session } from 'electron'
 
+// Forward renderer console output (importTasks/exportTasks run in the renderer
+// process, so their logs only reach the app's DevTools otherwise). This sends
+// them to the main-process console so they show up in the `npm start` terminal.
+ipcMain.on('renderer-console', (_e, data: { level: string; text: string }) => {
+  if (data.level === 'error' || data.level === 'warn') {
+    console.error('[renderer]', data.text)
+  } else if (data.level === 'log') {
+    console.log('[renderer]', data.text)
+  } else {
+    console.debug('[renderer]', data.text)
+  }
+})
+
 remoteMain.initialize()
 
 global.isDev = process.argv.includes('--dev')

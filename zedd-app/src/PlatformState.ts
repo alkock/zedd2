@@ -3,7 +3,7 @@ import { promises as fsp } from 'fs'
 import { computed, makeObservable, observable } from 'mobx'
 import * as path from 'path'
 import {
-  OTTIntegration,
+  OTTIntegrationNew,
   PlatformExportFormat,
   PlatformIntegration,
   PlatformType,
@@ -139,7 +139,7 @@ export class PlatformState {
     }
     this.integrationMap = {
       REPLICON: new RepliconIntegration(this.repliconLink, options),
-      OTT: new OTTIntegration(this.ottLink, options),
+      OTT: new OTTIntegrationNew(this.ottLink, options),
     }
   }
 
@@ -196,7 +196,14 @@ export class PlatformState {
         await this.savePlatformTasksToFile(this._tasks)
       }
     } catch (error) {
-      this.platformIntegration?.quitBrowser()
+      console.error('[PlatformState] importAndSavePlatformTasks failed:', error)
+      this.error = error instanceof Error ? error.message : String(error)
+    } finally {
+      // The browser is opened inside importTasks (via init). The new OTT
+      // integration no longer closes it itself, so always close it here —
+      // on success and on error — mirroring export()'s finally.
+      await this.platformIntegration?.quitBrowser()
+      this._currentlyImportingTasks = false
     }
   }
 

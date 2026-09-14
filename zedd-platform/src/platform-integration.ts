@@ -36,8 +36,18 @@ export abstract class PlatformIntegration {
     await this.page.goto(this.platformLink)
   }
 
+  /**
+   * This method imports tasks for a given platform.
+   * @param notifyTasks
+   */
   abstract importTasks(notifyTasks?: (p: Task[]) => void): Promise<Task[]>
 
+  /**
+   * This method exports timesheets to a given platform
+   *
+   * @param data
+   * @param submitTimesheets
+   */
   abstract exportTasks(data: PlatformExportFormat, submitTimesheets: boolean): Promise<void>
 
   abstract quitBrowser(): Promise<void>
