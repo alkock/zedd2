@@ -1,7 +1,7 @@
 import { PlatformIntegration } from '../src/platform-integration'
-import { OTTIntegrationNew } from '../src/ott-integration-new'
+import { OTTIntegration } from '../src/ott-integration'
 
-const platformIntegration: PlatformIntegration = new OTTIntegrationNew('', {
+const platformIntegration: PlatformIntegration = new OTTIntegration('', {
   headless: false,
   executablePath: '',
 })

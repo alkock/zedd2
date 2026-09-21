@@ -1,413 +1,461 @@
-import { ElementHandle } from 'puppeteer'
 import { PlatformExportFormat, Task } from './model'
 import { PlatformOptions } from './model/platform.options.model'
 import { PlatformIntegration } from './platform-integration'
-import { isAfter, isBefore, isWithinInterval, min as dateMin, parse, parseISO } from 'date-fns'
-import { enGB } from 'date-fns/locale'
-import partition from 'lodash/partition'
-import { What } from './model/what.model'
-import { WorkEntry } from './model/work-entry.model'
-import { $x, clearInput, waitForXPath } from './utils'
 
+import { magicToken, getCurrentMonthDatePath } from './utils'
+import {
+  eachDayOfInterval,
+  endOfMonth,
+  format,
+  max as dateMax,
+  min as dateMin,
+  parseISO,
+  startOfMonth,
+} from 'date-fns'
 export class OTTIntegration extends PlatformIntegration {
+  private authorizationHeader?: string
+  private username?: string
+  private userId?: number
+
+  //TODO: Hardcordiert.
+  WORK_LOCATION_ID = 1604387 //GERMANY ist in /lean/wsr/protected/ott/getWorkLocations/USRID
+  WORK_PLACE_ID = 1604435
+
   public constructor(platformLink: string, options: PlatformOptions) {
     super(platformLink, options)
   }
 
-  async importTasks(notifyTasks?: (p: Task[]) => void): Promise<Task[]> {
-    await this.init()
-    await this.page.waitForSelector('[role="table"]')
+  private attachAuthCapture(): void {
+    this.page.on('request', (request) => {
+      const authorization = request.headers()['authorization']
 
-    await this.page.setRequestInterception(true)
-
-    const [dropdownNode] = (await $x(
-      this.page,
-      "//*[contains(text(), 'Issue Filter')]/../../div/div[@role='button']",
-    )) as [ElementHandle<Element>]
-
-    await dropdownNode.click()
-
-    const dropdownOptions = await this.page.waitForSelector('ul[role="listbox"]')
-
-    const allAssigned = await dropdownOptions?.waitForSelector('li[data-value="All"]')
-    await allAssigned!.click()
-    this.page.on('request', (req) => {
-      req.continue()
-    })
-    return new Promise<Task[]>((resolve, reject) => {
-      this.page.on('response', async (res) => {
-        try {
-          if ((await res.text()).includes('assignedIssues')) {
-            const jsonResponse = await res.json()
-
-            if (jsonResponse && Array.isArray(jsonResponse.data)) {
-              const tasks = this.getTasksFromJson(jsonResponse)
-              notifyTasks && notifyTasks(tasks)
-              await this.browser.close()
-              resolve(tasks) // Resolving the promise with the tasks
-            }
-          }
-        } catch (error) {
-          console.error('Error parsing JSON:', error)
-          await this.browser.close()
-          reject(error) // Rejecting the promise if there is an error
-        }
-      })
+      if (authorization && request.url().includes('/lean/wsr/protected/')) {
+        this.authorizationHeader = authorization
+      }
     })
   }
 
-  async exportTasks(whatt: PlatformExportFormat, submitTimesheets: boolean): Promise<void> {
+  override async importTasks(notifyTasks?: (p: Task[]) => void): Promise<Task[]> {
+    console.log('[OTT] importTasks started; platformLink:', this.platformLink)
     await this.init()
-    let what: What[] = Object.keys(whatt).map((dateString: string) => ({
-      day: parseISO(dateString),
-      work: whatt[dateString],
-    }))
-
+    this.attachAuthCapture()
+    await this.page.reload()
     await this.page.waitForSelector('[role="table"]')
+    const username = await this.fetchUsernameandId()
+    const currentMonthDatePath = getCurrentMonthDatePath()
+    const workLogData = await this.getWorkLogData(magicToken(username), currentMonthDatePath)
 
-    await this.checkOneWeek()
-
-    await this.clickAllEngagements()
-
-    // nächstes Zeitformular ausfüllen, obwohl ein vorheriges Zeitformular aktuell finalized ist
-    let deferredAlreadyFinalizedError: unknown = null
-    while (what.length > 0) {
-      await this.page.waitForSelector('[role="table"]')
-
-      await this.sleep(1)
-
-      await this.chooseDateFromCalendar(what)
-
-      await this.deleteAllTasks()
-
-      await this.clickAllAssigned()
-
-      const timerange = await this.page.evaluate(() => {
-        const spans = Array.from(document.querySelectorAll('span.MuiButton-label'))
-        const regex = /^[A-Z][a-z]{2,8} \d{2} \d{4} - [A-Z][a-z]{2,8} \d{2} \d{4}$/
-        const range = spans.find((span) => regex.test(span.textContent?.trim() || ''))
-        return range!.textContent!.trim()
-      })
-
-      const [start, end] = timerange
-        .split(' - ')
-        .map((ds) => parse(ds.trim(), 'MMM dd yyyy', new Date(), { locale: enGB }))
-
-      const [relevant, others] = partition(what, (w) => isWithinInterval(w.day, { start, end }))
-
-      try {
-        await this.checkFinilisedButton(timerange)
-      } catch (err) {
-        deferredAlreadyFinalizedError = err
-        what = others
-        continue
-      }
-
-      for (let i = 0; i < relevant.length; i++) {
-        for (let j = 0; j < relevant[i].work.length; j++) {
-          await this.addNewTask(relevant[i].work[j], start, relevant[i].day)
-        }
-      }
-
-      what = others
-    }
-
-    if (deferredAlreadyFinalizedError) throw deferredAlreadyFinalizedError
-
-    await this.finaliseTimesheet(submitTimesheets)
-  }
-
-  private getTasksFromJson(jsonResponse: any): Task[] {
-    let tasks: Task[] = []
-
-    for (let i = 0; i < jsonResponse.data[0].assignedIssues.length; i++) {
-      let assignedIssue = jsonResponse.data[0].assignedIssues[i]
-      let assoBoardProjectCodes = jsonResponse.data[0].assoBoardProjectCodes
-      let projectIndex = -1
-      for (let j = 0; j < assoBoardProjectCodes.length; j++) {
-        if (assoBoardProjectCodes[j].projectCodeId === +assignedIssue.projectCode) {
-          projectIndex = j
-        }
-      }
-      let task: Task = {
-        name: assignedIssue.title,
-        intId: assignedIssue.appointmentId,
-        projectIntId: projectIndex > -1 ? assoBoardProjectCodes[projectIndex].gfsProjectCode : null,
-        projectName: projectIndex > -1 ? assoBoardProjectCodes[projectIndex].gtmProjectName : null,
-        start: undefined,
-        end: undefined,
-        taskCode: projectIndex > -1 ? assoBoardProjectCodes[projectIndex].gfsTaskCode : null,
-        typ: 'OTT',
-      }
-      tasks.push(task)
-    }
-
+    const tasks = this.mapWorkLogDataToTasks(workLogData)
+    notifyTasks && notifyTasks(tasks)
     return tasks
   }
 
-  private async deleteAllTasks() {
-    await this.clickAllAssigned('bookedInPeriod')
-    const checkbox = await this.page.waitForSelector('th.wlh_checkbox input[type="checkbox"]')
-    await checkbox?.click()
-
-    const deleteButton = await this.clickElementWithContent(
-      "//button[.//span[contains(text(), 'Delete')] and not(@disabled)]",
-    )
-
-    if (deleteButton) {
-      const timeEntriesDialog = await this.page.waitForSelector('div[role="dialog"]')
-
-      let reasonDialog = await timeEntriesDialog!.waitForSelector(
-        'textarea[placeholder="Please provide a reason"]',
-      )
-      await reasonDialog?.type('Korrektur')
-      await this.clickElementWithContent("//button[.//span[text()='Yes, Continue']]")
-      await this.page.waitForSelector('div[role="dialog"]', { hidden: true })
-    }
-  }
-
-  private async addNewTask(work: WorkEntry, startWeek: Date, taskDay: Date) {
-    if (work.platformType === 'REPLICON') return
-    let addNewTaskInput = await this.page.waitForSelector("input[placeholder*='Search task']")
-    const [clearButton] = await $x(
-      this.page,
-      "//input[contains(@placeholder, 'Search task')]/../div/button[contains(@title, 'Clear')]",
-    )
-    await (clearButton as ElementHandle<Element>)!.click()
-
-    await addNewTaskInput!.type(String(work.taskName))
-
-    let rowWithSearchedTaskNode = await waitForXPath(
-      this.page,
-      "//tr[.//div[text()='" + work.taskName + "']]",
-    )
-
-    if (!rowWithSearchedTaskNode) {
-      throw new Error('Task ' + work.taskName + ' konnte nicht gefunden werden.')
-      return
-    }
-
-    const cellDayInRow = taskDay.getDate() - startWeek.getDate()
-    const tdHandles = await rowWithSearchedTaskNode.$$('td.wlbc_bydate')
-    const colWithWeekday = tdHandles[cellDayInRow]
-
-    await this.page.mouse.click(0, 0)
-
-    await this.addTimesAndCommentToTask(work, taskDay, colWithWeekday)
-  }
-
-  private async clickAllAssigned(value: string = 'All') {
-    await this.sleep(2)
-    const [issueFilterElement] = (await $x(
-      this.page,
-      "//*[contains(text(), 'Issue Filter')]/../../div/div[@role='button']",
-    )) as [ElementHandle<Element>]
-
-    if (issueFilterElement) {
-      await issueFilterElement.click()
-      const dropdownOptions = await this.page.waitForSelector('ul[role="listbox"]')
-
-      const allAssigned = await dropdownOptions?.waitForSelector('li[data-value="' + value + '"]')
-      await allAssigned!.click()
-
-      await this.page.waitForSelector('[role="table"]')
-    }
-  }
-
-  private async clickAllEngagements() {
-    const [engagementElement] = await $x(this.page, "//*[text() = 'Engagement']")
-
-    const engagementSelect = (await engagementElement.evaluateHandle((el) => {
-      let parent: Element | null = el as unknown as Element
-      while (parent) {
-        const buttonDiv = parent.querySelector('div[role="button"]')
-        if (buttonDiv) {
-          return buttonDiv
-        }
-        parent = parent.parentElement
-      }
-      return null
-    })) as ElementHandle<Element>
-
-    if (engagementSelect) {
-      await engagementSelect.click()
-      const dropdownOptions = await this.page.waitForSelector('ul[role="listbox"]')
-
-      const allAssigned = await dropdownOptions?.waitForSelector('li[title="All"]')
-      await allAssigned!.click()
-
-      await this.page.waitForSelector('[role="table"]')
-    }
-  }
-
-  private async checkOneWeek() {
-    const periodTypeSelect = await this.clickElementWithContent(
-      "//div[contains(@role, 'button') and contains(text(), 'One month')]",
-    )
-
-    if (periodTypeSelect) {
-      const dropdownOptions = await this.page.waitForSelector('ul[role="listbox"]')
-
-      const week = await dropdownOptions?.waitForSelector('li[data-value="week"]')
-      await week!.click()
-      await this.page.waitForSelector('[role="table"]')
-    }
-  }
-
-  private async chooseDateFromCalendar(what: What[]) {
-    const minDate = dateMin(what.map((w) => w.day))
-
-    const minDateAlsMonthYear = new Intl.DateTimeFormat('en-US', {
-      month: 'long',
-      year: 'numeric',
-    }).format(minDate)
-
-    const calendarRangeDateNode = await this.page.evaluateHandle(() => {
-      const spans = Array.from(document.querySelectorAll('span.MuiButton-label'))
-      const regex = /^[A-Z][a-z]{2,8} \d{2} \d{4} - [A-Z][a-z]{2,8} \d{2} \d{4}$/
-      return spans.find((span) => regex.test(span.textContent!.trim()))
-    })
-
-    const calendarRangeDate = calendarRangeDateNode as unknown as ElementHandle<Element>
-    await calendarRangeDate.click()
-
-    const calendarMainWindow = await this.page.waitForSelector('.DayPicker-wrapper')
-    const minDateAlsMonthYearAlsDate: Date = new Date(minDateAlsMonthYear)
-    while (true) {
-      let calendarDateMonthYear = (await calendarMainWindow?.$$eval(
-        '.DayPicker-Caption > div',
-        (elements) => elements.map((el) => el.textContent!.trim())[0],
-      )) as string
-      let calendarDateMonthAlsDate: Date = new Date(calendarDateMonthYear)
-      if (isBefore(minDateAlsMonthYearAlsDate, calendarDateMonthAlsDate)) {
-        const prev = await calendarMainWindow!.waitForSelector('span[aria-label="Previous Month"]')
-        await prev!.click()
-      } else if (isAfter(minDateAlsMonthYearAlsDate, calendarDateMonthAlsDate)) {
-        const next = await calendarMainWindow!.waitForSelector('span[aria-label="Next Month"]')
-        await next!.click()
-      } else {
-        break
-      }
-    }
-    const calendarWeeksBody = await calendarMainWindow!.waitForSelector(
-      '.DayPicker-Months > .DayPicker-Month > .DayPicker-Body',
-    )
-    const weeks: ElementHandle[] = await calendarWeeksBody!.$$('.DayPicker-Week')
-
-    for (const weekEl of weeks) {
-      const dayElements = await weekEl.$$('.DayPicker-Day')
-
-      for (const dayEl of dayElements) {
-        const ariaLabel = await dayEl.evaluate((node) => node.getAttribute('aria-label'))
-
-        if (ariaLabel === minDate.toDateString()) {
-          await dayEl.click()
-          break
-        }
-      }
-    }
-
-    await this.page.mouse.click(0, 0)
-  }
-
-  private async checkFinilisedButton(timerange: string) {
-    const finaliseBtnHandleNode = await waitForXPath(
-      this.page,
-      "//button[.//span[contains(text(), 'Finalize')]]",
-    )
-    const finaliseBtnHandle = finaliseBtnHandleNode as unknown as HTMLButtonElement
-    const isDisabled = await this.page.evaluate((el) => el.disabled, finaliseBtnHandle)
-    if (isDisabled) {
-      throw new Error('Finalize button is disabled in period ' + timerange)
-    }
-  }
-
-  private async addTimesAndCommentToTask(
-    work: WorkEntry,
-    day: Date,
-    colWithWeekday: ElementHandle<HTMLTableCellElement>,
-  ) {
-    const dayNumber = String(day.getDate()).padStart(2, '0')
-    const weekday = day.toLocaleString('en-US', { weekday: 'short' })
-
-    const dayInHeader = await this.clickElementWithContent(
-      `//th[@role='columnheader' and contains(@class, 'wlh_date') and .//div[text()='${dayNumber}'] and .//div[text()='${weekday}']]`,
-    )
-
-    await colWithWeekday?.click()
-    const inputWeekday = await colWithWeekday.$('input')
-    await clearInput(inputWeekday)
-    await inputWeekday?.type(String(work.hours))
-
-    await this.page.mouse.click(0, 0)
-
-    let [rowWithSearchedTaskNodeUpdated] = await $x(
-      this.page,
-      "//tr[.//div[text()='" + work.taskName + "']]",
-    )
-
-    let comment = work.comment
-
-    if (comment) {
-      const commentTextBox = await rowWithSearchedTaskNodeUpdated.waitForSelector(
-        'textarea[placeholder="Comment"]',
-      )
-      await this.fillTextarea(commentTextBox, String(comment))
-      //await commentTextBox?.type(String(comment)) // instabil bei längeren Kommentaren
-    }
-    await dayInHeader?.click()
-  }
-
-  /**
-   * AI-generated function to handle textarea onchange events.
-   * Alternative for page.type(string) because it is instable for long text i.e. missing characters.
-   */
-  private async fillTextarea(element: ElementHandle | null, value: string) {
-    await element?.evaluate((el, val) => {
-      const textarea = el as HTMLTextAreaElement
-      textarea.focus()
-
-      // React-safe native setter (relevant für kontrollierte Komponenten)
-      const proto = Object.getPrototypeOf(textarea)
-      const desc =
-        Object.getOwnPropertyDescriptor(proto, 'value') ||
-        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')
-      if (desc && desc.set) {
-        desc.set!.call(textarea, val)
-      } else {
-        textarea.value = val
-      }
-
-      // Feuere ein InputEvent (mit inputType, hilft bei libs die auf InputEvent prüfen)
-      const inputEvt = new InputEvent('input', {
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-        data: val,
-        inputType: 'insertText',
-      })
-      textarea.dispatchEvent(inputEvt)
-
-      // Manche Frameworks reagieren auf 'change' / 'blur' / keyboard events
-      textarea.dispatchEvent(new Event('change', { bubbles: true }))
-      textarea.dispatchEvent(new Event('blur', { bubbles: true }))
-    }, value)
-  }
-
-  private async finaliseTimesheet(submitTimesheets: boolean) {
-    if (submitTimesheets) {
-      await this.clickElementWithContent("//button[.//span[contains(text(), 'Finalise')]]")
-      await waitForXPath(this.page, "//div[contains(text(), 'FINALISING YOUR TIMESHEET')]")
-      await this.clickElementWithContent("//button[.//span[text()='Yes, Continue']]")
-      await waitForXPath(this.page, "//div[contains(text(), 'FINALISING YOUR TIMESHEET')]", {
-        hidden: true,
-      })
-    }
-  }
-
-  async quitBrowser(): Promise<void> {
+    override async quitBrowser(): Promise<void> {
     if (this.browser) {
       await this.browser.close()
     }
   }
+
+   override async exportTasks(data: PlatformExportFormat, submitTimesheets: boolean): Promise<void> {
+    // Submit Timesheets is not done. It is not nessecary. 
+    void submitTimesheets
+
+    const days = Object.keys(data)
+    if (days.length === 0) return
+
+    await this.init()
+    this.attachAuthCapture()
+    await this.page.reload()
+    await this.page.waitForSelector('[role="table"]')
+
+    const usernameMagic = magicToken(await this.fetchUsernameandId())
+    const exportDatePath = this.datePathFromDays(days)
+    console.log('[OTT] export datePath:', exportDatePath)
+    const workLogData = await this.getWorkLogData(usernameMagic, exportDatePath)
+    console.log(
+      '[OTT] export workLogData: assignedIssues:',
+      workLogData.assignedIssues.length,
+      '| assoBoardProjectCodes:',
+      workLogData.assoBoardProjectCodes.length,
+      '| timeEntries:',
+      workLogData.timeEntries.length,
+    )
+
+    const { projectMap, issueMap } = this.buildProjectMaps(workLogData)
+    const existingMap = new Map(
+      workLogData.timeEntries.map((te) => [`${te.appointmentId}-${te.dateLogged}`, te]),
+    )
+
+    const parsedDays = days.map((day) => parseISO(day))
+    const exportDays = new Set(
+      eachDayOfInterval({ start: dateMin(parsedDays), end: dateMax(parsedDays) }).map((d) =>
+        Number(format(d, 'yyyyMMdd')),
+      ),
+    )
+    const desiredKeys = new Set<string>()
+    for (const [day, entries] of Object.entries(data)) {
+      const dateLogged = Number(day.replace(/-/g, ''))
+      for (const we of entries) {
+        desiredKeys.add(`${we.taskIntId}-${dateLogged}`)
+      }
+    }
+
+    for (const [day, entries] of Object.entries(data)) {
+      const dateLogged = Number(day.replace(/-/g, ''))
+      if (Number.isNaN(dateLogged)) {
+        throw new Error(`Unerwarteter Day-Key im Export: '${day}' (erwartet yyyy-MM-dd)`)
+      }
+
+      for (const we of entries) {
+        const issue = issueMap.get(Number(we.taskIntId))
+        const resolvedBoardId = issue
+          ? projectMap.get(Number(issue.projectCode))?.boardId
+          : undefined
+        console.log(
+          `[OTT] export ${we.taskName} ${day}: issue${issue ? ' found' : ' NOT FOUND'}, ` +
+            `projectCode=${issue?.projectCode}, boardId=${resolvedBoardId ?? '-'}`,
+        )
+        if (!issue) {
+          throw new Error(`Kein OTT-Issue für taskIntId ${we.taskIntId} (${we.taskName})`)
+        }
+        const project = projectMap.get(Number(issue.projectCode))
+        if (!project) {
+          throw new Error(
+            `Kein OTT-Projekt für projectCode ${issue.projectCode} (Task ${we.taskName}). ` +
+              `Bekannte projectCodeIds: ${[...projectMap.keys()].join(', ')}`,
+          )
+        }
+        if (project.boardId == null) {
+          throw new Error(
+            `OTT-Projekt ${issue.projectCode} (${project.gtmProjectName ?? project.gfsProjectCode}) ` +
+              `hat kein boardId (Task ${we.taskName}). OTT liefert für diesen Eintrag kein boardId in ` +
+              `assoBoardProjectCodes, daher kann der TimeEntry nicht via API angelegt werden.`,
+          )
+        }
+
+        const existing = existingMap.get(`${we.taskIntId}-${dateLogged}`)
+        let response: { status?: string; message?: string }
+
+        if (existing && existing.hoursLogged === we.hours) {
+          // Identische Stunden -> kein POST (wie OTTzTalker), aber Comment wird trotzdem gesendet.
+          console.log(`Skip (Schon korrekt, ${we.hours}h): ${we.taskName} ${day}`)
+          response = { status: '0' }
+        } else if (existing) {
+          // Update-Zweig: activityId wird NICHT gesendet (Referenz sendet es nicht,
+          // da es eine bestehende activityId sonst auf null setzen würde).
+          response = await this.postJson('/lean/wsr/protected/ott/updateTimeEntry', {
+            id: Number(existing.id),
+            appointmentId: Number(we.taskIntId),
+            stickyNoteId: Number(issue.stickyNoteId),
+            dateLogged,
+            hoursLogged: we.hours,
+            description: '',
+            loggedFor: Number(this.userId),
+            trackingType: 1,
+            boardId: Number(project.boardId),
+            engagementId: Number(issue.engagementId),
+            issueName: we.taskName,
+            workLocationId: this.WORK_LOCATION_ID,
+            workPlaceId: this.WORK_PLACE_ID,
+          })
+        } else {
+          // Create-Zweig
+          response = await this.postJson('/lean/wsr/protected/ott/timeEntry', {
+            appointmentId: Number(we.taskIntId),
+            stickyNoteId: Number(issue.stickyNoteId),
+            dateLogged,
+            hoursLogged: we.hours,
+            description: '',
+            loggedFor: Number(this.userId),
+            trackingType: 1,
+            boardId: Number(project.boardId),
+            engagementId: Number(issue.engagementId),
+            issueName: we.taskName,
+            activityId: null,
+            workLocationId: this.WORK_LOCATION_ID,
+            workPlaceId: this.WORK_PLACE_ID,
+          })
+        }
+
+        if (response?.status !== '0') {
+          throw new Error(
+            `OTT timeEntry fehlgeschlagen für ${we.taskName} (${day}): ${JSON.stringify(response)}`,
+          )
+        }
+
+        if (we.comment) {
+          const commentResponse = await this.postJson(
+            `/lean/wsr/protected/ott/createOrUpdateOttStickyComment/${usernameMagic}`,
+            [
+              {
+                id: null,
+                userId: Number(this.userId),
+                stickyNoteId: Number(issue.stickyNoteId),
+                appointmentId: Number(we.taskIntId),
+                workLocationId: this.WORK_LOCATION_ID,
+                workPlaceId: this.WORK_PLACE_ID,
+                loggedDate: String(dateLogged),
+                comment: we.comment,
+              },
+            ],
+          )
+          if (commentResponse?.status !== '0') {
+            throw new Error(
+              `OTT Comment fehlgeschlagen für ${we.taskName} (${day}): ${JSON.stringify(commentResponse)}`,
+            )
+          }
+        }
+      }
+    }
+    await this.deleteStaleTimeEntries(workLogData, exportDays, desiredKeys)
+  }
+
+  /**
+   * Retrieves the currently authenticated OTT username, it additionally sets the userId.
+   *
+   * @returns The login name of the currently authenticated OTT user.
+   * @throws Error if no authorization header has been captured.
+   * @throws Error if the request fails or the username is missing in the response.
+   */
+  private async fetchUsernameandId(): Promise<string> {
+    if (!this.authorizationHeader) {
+      throw new Error('No username captured')
+    }
+
+    const userData = await this.page.evaluate(async (auth) => {
+      const response = await fetch('/lean/wsr/protected/users/data', {
+        method: 'GET',
+        headers: {
+          authorization: auth,
+        },
+        credentials: 'include',
+      })
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} ${response.statusText}`)
+      }
+
+      return response.json()
+    }, this.authorizationHeader)
+
+    this.username = userData?.data?.[0]?.login
+    this.userId = userData?.data?.[0]?.id
+
+    if (!this.username) {
+      throw new Error('Username not found in response')
+    }
+
+    return this.username
+  }
+
+  /**
+   * This method returns the given work Data that consists of the unstructured Tasks.
+   * @param userNameMagic - The username in ASCII-encoding created with the name parser under tutils.
+   * @param datePath - The date path created with the dateParser under utils.
+   * @returns Raw work log data as type OttWorkLogData
+   */
+  private async getWorkLogData(userNameMagic: string, datePath: string): Promise<OttWorkLogData> {
+    if (!this.authorizationHeader) {
+      throw new Error('No username captured')
+    }
+
+    return this.page.evaluate(
+      async ({ userNameMagic, datePath, auth }) => {
+        const response = await fetch(
+          `/lean/wsr/protected/ott/getMemberWorkLogData/${userNameMagic}/${userNameMagic}/${datePath}/All`,
+          {
+            method: 'GET',
+            headers: {
+              authorization: auth,
+            },
+            credentials: 'include',
+          },
+        )
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status} ${response.statusText}`)
+        }
+
+        const json = await response.json()
+        return json.data[0]
+      },
+      {
+        userNameMagic,
+        datePath,
+        auth: this.authorizationHeader,
+      },
+    )
+  }
+
+  /**
+   * Derives the OTT date path (yyyyMMdd/yyyyMMdd) from the exported days.
+   */
+  private datePathFromDays(days: string[]): string {
+    const min = days.reduce((a, b) => (a < b ? a : b), days[0])
+    const max = days.reduce((a, b) => (a > b ? a : b), days[0])
+
+    return [
+      format(startOfMonth(parseISO(min)), 'yyyyMMdd'),
+      format(endOfMonth(parseISO(max)), 'yyyyMMdd'),
+    ].join('/')
+  }
+
+  private buildProjectMaps(workLogData: OttWorkLogData) {
+    const projectMap = new Map(
+      workLogData.assoBoardProjectCodes.map((project) => [Number(project.projectCodeId), project]),
+    )
+    const issueMap = new Map(
+      workLogData.assignedIssues.map((issue) => [Number(issue.appointmentId), issue]),
+    )
+    return { projectMap, issueMap }
+  }
+
+  /**
+   * This method maps the raw OTT response to the internal task structure.
+   * @param workLogData the raw return type from OTT
+   * @returns an array of Tasks
+   */
+  private mapWorkLogDataToTasks(workLogData: OttWorkLogData): Task[] {
+    const { projectMap } = this.buildProjectMaps(workLogData)
+
+    return workLogData.assignedIssues.map((issue) => {
+      const project = projectMap.get(Number(issue.projectCode))
+
+      return {
+        name: issue.title,
+        intId: issue.appointmentId,
+        projectIntId: project?.gfsProjectCode ?? 0,
+        projectName: project?.gtmProjectName ?? '',
+        taskCode: project?.gfsTaskCode ?? '',
+        typ: 'OTT',
+      } satisfies Task
+    })
+  }
+
+ 
+/** 
+   *
+   * @param workLogData - der vom OTT gelieferte Bestand (Quelle der zu räumenden Einträge)
+   * @param exportDays - der exportierte Tagbereich (leere Tage eingeschlossen)
+   * @param desiredKeys - die (taskIntId,Tag)-Kombis, die in Zedd bleiben sollen
+   */
+  private async deleteStaleTimeEntries(
+    workLogData: OttWorkLogData,
+    exportDays: Set<number>,
+    desiredKeys: Set<string>,
+  ): Promise<void> {
+    const toDelete: Array<{
+      id: number
+      appointmentId: number
+      stickyNoteId: number
+      dateLogged: number
+      hoursLogged: number
+      description: string
+      loggedFor: number
+      trackingType: number
+      boardId: number
+      engagementId: number
+      originalValues: Record<string, string | number>
+      workLocationId: number
+      workPlaceId: number
+      reason: string
+    }> = []
+    for (const te of workLogData.timeEntries) {
+      if (!exportDays.has(Number(te.dateLogged))) continue
+      const key = `${te.appointmentId}-${Number(te.dateLogged)}`
+      if (desiredKeys.has(key)) continue
+      if (Number(te.hoursLogged) === 0) continue
+      const dateLogged = Number(te.dateLogged)
+      const hoursLogged = Number(te.hoursLogged)
+      const loggedFor = Number(te.loggedFor) || Number(this.userId)
+      toDelete.push({
+        id: Number(te.id),
+        appointmentId: Number(te.appointmentId),
+        stickyNoteId: Number(te.stickyNoteId),
+        dateLogged,
+        hoursLogged,
+        description: te.description ?? '',
+        loggedFor,
+        trackingType: Number(te.trackingType),
+        boardId: Number(te.boardId),
+        engagementId: Number(te.engagementId),
+        // "Issue Id" ist die stickyNoteId (siehe OTT-Referenz-Payload).
+        originalValues: {
+          'Issue Name': te.issueName,
+          'Issue Id': Number(te.stickyNoteId),
+          Date: dateLogged,
+          Duration: hoursLogged,
+          Description: te.description ?? '',
+          'Logged For': loggedFor,
+          'Work Location': this.WORK_LOCATION_ID,
+          'Place of Work': this.WORK_PLACE_ID,
+        },
+        workLocationId: this.WORK_LOCATION_ID,
+        workPlaceId: this.WORK_PLACE_ID,
+        reason: 'Time booking adjustment.',
+      })
+    }
+    if (toDelete.length === 0) return
+    console.log(
+      `[OTT] Reconciliation: lösche insgesamt ${toDelete.length} verwaiste(n) OTT-Eintrag(e).`,
+    )
+    const response = await this.deleteJson('/lean/wsr/protected/ott/deleteTimeEntry', toDelete)
+    if (response?.status !== '0') {
+      throw new Error(
+        `OTT Reconciliation (deleteTimeEntry) fehlgeschlagen: ${JSON.stringify(response)}`,
+      )
+    }
+  }
+
+  private async postJson(
+    path: string,
+    body: unknown,
+  ): Promise<{ status?: string; message?: string }> {
+    if (!this.authorizationHeader) {
+      throw new Error('No authorization header captured')
+    }
+    return this.page.evaluate(
+      async ({ path, auth, body }) => {
+        const response = await fetch(path, {
+          method: 'POST',
+          headers: { authorization: auth, 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify(body),
+        })
+        return response.json()
+      },
+      { path, auth: this.authorizationHeader, body },
+    )
+  }
+
+  private async deleteJson(
+    path: string,
+    body: unknown,
+  ): Promise<{ status?: string; message?: string }> {
+    if (!this.authorizationHeader) {
+      throw new Error('No authorization header captured')
+    }
+    return this.page.evaluate(
+      async ({ path, auth, body }) => {
+        const response = await fetch(path, {
+          method: 'DELETE',
+          headers: { authorization: auth, 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify(body),
+        })
+        const text = await response.text()
+        if (!text) {
+          return { status: response.ok ? '0' : String(response.status), message: '' }
+        }
+        try {
+          return JSON.parse(text)
+        } catch {
+          return { status: response.ok ? '0' : String(response.status), message: text }
+        }
+      },
+      { path, auth: this.authorizationHeader, body },
+    )
+  }
+
+
 }

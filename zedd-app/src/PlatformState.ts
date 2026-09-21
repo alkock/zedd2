@@ -3,7 +3,7 @@ import { promises as fsp } from 'fs'
 import { computed, makeObservable, observable } from 'mobx'
 import * as path from 'path'
 import {
-  OTTIntegrationNew,
+  OTTIntegration,
   PlatformExportFormat,
   PlatformIntegration,
   PlatformType,
@@ -139,7 +139,7 @@ export class PlatformState {
     }
     this.integrationMap = {
       REPLICON: new RepliconIntegration(this.repliconLink, options),
-      OTT: new OTTIntegrationNew(this.ottLink, options),
+      OTT: new OTTIntegration(this.ottLink, options),
     }
   }
 
