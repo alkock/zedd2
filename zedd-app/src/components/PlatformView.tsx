@@ -499,7 +499,7 @@ export const PlatformView = observer((props: PlatformViewProps) => {
           ))}
           <TableRow>
             <TableCell colSpan={2} style={{ textAlign: 'right' }}>
-              <b>Summe (Summe mit TT)</b>
+              <b>Summe (Summe mit Reisezeit)</b>
             </TableCell>
             {intervals.map((w, i) => (
               <TableCell
