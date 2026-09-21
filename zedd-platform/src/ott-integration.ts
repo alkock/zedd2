@@ -1,5 +1,14 @@
 import { PlatformExportFormat, Task } from './model'
 import { PlatformOptions } from './model/platform.options.model'
+import { WorkEntry } from './model/work-entry.model'
+import {
+  OttAssignedIssue,
+  OttDeleteTimeEntry,
+  OttExportMaps,
+  OttProjectCode,
+  OttTimeEntry,
+  OttWorkLogData,
+} from './model/ott-work-log.model'
 import { PlatformIntegration } from './platform-integration'
 
 import { magicToken, getCurrentMonthDatePath } from './utils'
@@ -50,28 +59,60 @@ export class OTTIntegration extends PlatformIntegration {
     return tasks
   }
 
-    override async quitBrowser(): Promise<void> {
+  override async quitBrowser(): Promise<void> {
     if (this.browser) {
       await this.browser.close()
     }
   }
 
-   override async exportTasks(data: PlatformExportFormat, submitTimesheets: boolean): Promise<void> {
-    // Submit Timesheets is not done. It is not nessecary. 
+  /**
+   * Exports the given time entries to OTT and reconciles the result against what
+   * OTT currently holds. 
+   * */
+  override async exportTasks(data: PlatformExportFormat, submitTimesheets: boolean): Promise<void> {
+    // OTT has no separate "submit timesheet" step, so the flag has no effect here.
     void submitTimesheets
 
     const days = Object.keys(data)
     if (days.length === 0) return
 
+    // Phase 1 – open the browser and authenticate.
+    await this.login()
+
+    // Phase 2 – load the current OTT work log for the exported date range.
+    const usernameMagic = magicToken(await this.fetchUsernameandId())
+    const workLogData = await this.fetchWorkLog(usernameMagic, days)
+
+    // Phase 3 – index OTT data so export entries can be resolved against it.
+    const maps = this.buildExportMaps(workLogData)
+    const exportDays = this.exportedDays(days)
+    const desiredKeys = this.desiredTimeEntryKeys(data)
+
+    // Phase 4 – create/update/skip each time entry and apply its comment.
+    await this.applyTimeEntries(data, maps, usernameMagic)
+
+    // Phase 5 – delete OTT entries that are no longer part of the export.
+    await this.deleteStaleTimeEntries(workLogData, exportDays, desiredKeys)
+  }
+
+  /**
+   * Opens the OTT browser session and waits until the logged-in work log table is
+   * rendered so the captured authorization header can be reused for API calls.
+   */
+  private async login(): Promise<void> {
     await this.init()
     this.attachAuthCapture()
     await this.page.reload()
     await this.page.waitForSelector('[role="table"]')
+  }
 
-    const usernameMagic = magicToken(await this.fetchUsernameandId())
-    const exportDatePath = this.datePathFromDays(days)
-    console.log('[OTT] export datePath:', exportDatePath)
-    const workLogData = await this.getWorkLogData(usernameMagic, exportDatePath)
+  /**
+   * Fetches the raw OTT work log covering the given days and logs the resulting sizes.
+   */
+  private async fetchWorkLog(usernameMagic: string, days: string[]): Promise<OttWorkLogData> {
+    const datePath = this.datePathFromDays(days)
+    console.log('[OTT] export datePath:', datePath)
+    const workLogData = await this.getWorkLogData(usernameMagic, datePath)
     console.log(
       '[OTT] export workLogData: assignedIssues:',
       workLogData.assignedIssues.length,
@@ -80,18 +121,40 @@ export class OTTIntegration extends PlatformIntegration {
       '| timeEntries:',
       workLogData.timeEntries.length,
     )
+    return workLogData
+  }
 
+  /**
+   * Builds the lookups used to resolve export entries against OTT data:
+   * issues by appointmentId, projects by projectCodeId, and existing time entries
+   * by `${appointmentId}-${dateLogged}`.
+   */
+  private buildExportMaps(workLogData: OttWorkLogData): OttExportMaps {
     const { projectMap, issueMap } = this.buildProjectMaps(workLogData)
     const existingMap = new Map(
       workLogData.timeEntries.map((te) => [`${te.appointmentId}-${te.dateLogged}`, te]),
     )
+    return { projectMap, issueMap, existingMap }
+  }
 
+  /**
+   * Every calendar day inside the exported range, including empty days in between
+   * (used to scope reconciliation to the days actually exported).
+   */
+  private exportedDays(days: string[]): Set<number> {
     const parsedDays = days.map((day) => parseISO(day))
-    const exportDays = new Set(
+    return new Set(
       eachDayOfInterval({ start: dateMin(parsedDays), end: dateMax(parsedDays) }).map((d) =>
         Number(format(d, 'yyyyMMdd')),
       ),
     )
+  }
+
+  /**
+   * The `${taskIntId}-${dateLogged}` keys of every entry in the export – the set of
+   * time entries that should remain in OTT after reconciliation.
+   */
+  private desiredTimeEntryKeys(data: PlatformExportFormat): Set<string> {
     const desiredKeys = new Set<string>()
     for (const [day, entries] of Object.entries(data)) {
       const dateLogged = Number(day.replace(/-/g, ''))
@@ -99,115 +162,173 @@ export class OTTIntegration extends PlatformIntegration {
         desiredKeys.add(`${we.taskIntId}-${dateLogged}`)
       }
     }
+    return desiredKeys
+  }
 
+  /**
+   * Applies every exported work entry to OTT, entry by entry, in date order.
+   */
+  private async applyTimeEntries(
+    data: PlatformExportFormat,
+    maps: OttExportMaps,
+    usernameMagic: string,
+  ): Promise<void> {
     for (const [day, entries] of Object.entries(data)) {
       const dateLogged = Number(day.replace(/-/g, ''))
       if (Number.isNaN(dateLogged)) {
         throw new Error(`Unerwarteter Day-Key im Export: '${day}' (erwartet yyyy-MM-dd)`)
       }
-
       for (const we of entries) {
-        const issue = issueMap.get(Number(we.taskIntId))
-        const resolvedBoardId = issue
-          ? projectMap.get(Number(issue.projectCode))?.boardId
-          : undefined
-        console.log(
-          `[OTT] export ${we.taskName} ${day}: issue${issue ? ' found' : ' NOT FOUND'}, ` +
-            `projectCode=${issue?.projectCode}, boardId=${resolvedBoardId ?? '-'}`,
-        )
-        if (!issue) {
-          throw new Error(`Kein OTT-Issue für taskIntId ${we.taskIntId} (${we.taskName})`)
-        }
-        const project = projectMap.get(Number(issue.projectCode))
-        if (!project) {
-          throw new Error(
-            `Kein OTT-Projekt für projectCode ${issue.projectCode} (Task ${we.taskName}). ` +
-              `Bekannte projectCodeIds: ${[...projectMap.keys()].join(', ')}`,
-          )
-        }
-        if (project.boardId == null) {
-          throw new Error(
-            `OTT-Projekt ${issue.projectCode} (${project.gtmProjectName ?? project.gfsProjectCode}) ` +
-              `hat kein boardId (Task ${we.taskName}). OTT liefert für diesen Eintrag kein boardId in ` +
-              `assoBoardProjectCodes, daher kann der TimeEntry nicht via API angelegt werden.`,
-          )
-        }
-
-        const existing = existingMap.get(`${we.taskIntId}-${dateLogged}`)
-        let response: { status?: string; message?: string }
-
-        if (existing && existing.hoursLogged === we.hours) {
-          // Identische Stunden -> kein POST (wie OTTzTalker), aber Comment wird trotzdem gesendet.
-          console.log(`Skip (Schon korrekt, ${we.hours}h): ${we.taskName} ${day}`)
-          response = { status: '0' }
-        } else if (existing) {
-          // Update-Zweig: activityId wird NICHT gesendet (Referenz sendet es nicht,
-          // da es eine bestehende activityId sonst auf null setzen würde).
-          response = await this.postJson('/lean/wsr/protected/ott/updateTimeEntry', {
-            id: Number(existing.id),
-            appointmentId: Number(we.taskIntId),
-            stickyNoteId: Number(issue.stickyNoteId),
-            dateLogged,
-            hoursLogged: we.hours,
-            description: '',
-            loggedFor: Number(this.userId),
-            trackingType: 1,
-            boardId: Number(project.boardId),
-            engagementId: Number(issue.engagementId),
-            issueName: we.taskName,
-            workLocationId: this.WORK_LOCATION_ID,
-            workPlaceId: this.WORK_PLACE_ID,
-          })
-        } else {
-          // Create-Zweig
-          response = await this.postJson('/lean/wsr/protected/ott/timeEntry', {
-            appointmentId: Number(we.taskIntId),
-            stickyNoteId: Number(issue.stickyNoteId),
-            dateLogged,
-            hoursLogged: we.hours,
-            description: '',
-            loggedFor: Number(this.userId),
-            trackingType: 1,
-            boardId: Number(project.boardId),
-            engagementId: Number(issue.engagementId),
-            issueName: we.taskName,
-            activityId: null,
-            workLocationId: this.WORK_LOCATION_ID,
-            workPlaceId: this.WORK_PLACE_ID,
-          })
-        }
-
-        if (response?.status !== '0') {
-          throw new Error(
-            `OTT timeEntry fehlgeschlagen für ${we.taskName} (${day}): ${JSON.stringify(response)}`,
-          )
-        }
-
-        if (we.comment) {
-          const commentResponse = await this.postJson(
-            `/lean/wsr/protected/ott/createOrUpdateOttStickyComment/${usernameMagic}`,
-            [
-              {
-                id: null,
-                userId: Number(this.userId),
-                stickyNoteId: Number(issue.stickyNoteId),
-                appointmentId: Number(we.taskIntId),
-                workLocationId: this.WORK_LOCATION_ID,
-                workPlaceId: this.WORK_PLACE_ID,
-                loggedDate: String(dateLogged),
-                comment: we.comment,
-              },
-            ],
-          )
-          if (commentResponse?.status !== '0') {
-            throw new Error(
-              `OTT Comment fehlgeschlagen für ${we.taskName} (${day}): ${JSON.stringify(commentResponse)}`,
-            )
-          }
-        }
+        await this.applyWorkEntry(we, day, dateLogged, maps, usernameMagic)
       }
     }
-    await this.deleteStaleTimeEntries(workLogData, exportDays, desiredKeys)
+  }
+
+  /**
+   * Resolves the OTT issue/project for a single export entry, syncs its time entry
+   * (create, update or skip), and writes its comment.
+   */
+  private async applyWorkEntry(
+    we: WorkEntry,
+    day: string,
+    dateLogged: number,
+    maps: OttExportMaps,
+    usernameMagic: string,
+  ): Promise<void> {
+    const { issue, project } = this.resolveIssueAndProject(we, maps)
+    const existing = maps.existingMap.get(`${we.taskIntId}-${dateLogged}`)
+
+    await this.syncTimeEntry(we, day, dateLogged, issue, project, existing)
+    await this.writeComment(we, day, dateLogged, issue, usernameMagic)
+  }
+
+  /**
+   * Resolves the OTT issue and its project for an export entry, failing with a
+   * descriptive error if either cannot be found or the project has no boardId.
+   */
+  private resolveIssueAndProject(we: WorkEntry, maps: OttExportMaps):
+    { issue: OttAssignedIssue; project: OttProjectCode } {
+    const issue = maps.issueMap.get(Number(we.taskIntId))
+    const resolvedBoardId = issue ? maps.projectMap.get(Number(issue.projectCode))?.boardId : undefined
+    console.log(
+      `[OTT] export ${we.taskName} ${we.id}: issue${issue ? ' found' : ' NOT FOUND'}, ` +
+        `projectCode=${issue?.projectCode}, boardId=${resolvedBoardId ?? '-'}`,
+    )
+    if (!issue) {
+      throw new Error(`Kein OTT-Issue für taskIntId ${we.taskIntId} (${we.taskName})`)
+    }
+    const project = maps.projectMap.get(Number(issue.projectCode))
+    if (!project) {
+      throw new Error(
+        `Kein OTT-Projekt für projectCode ${issue.projectCode} (Task ${we.taskName}). ` +
+          `Bekannte projectCodeIds: ${[...maps.projectMap.keys()].join(', ')}`,
+      )
+    }
+    if (project.boardId == null) {
+      throw new Error(
+        `OTT-Projekt ${issue.projectCode} (${project.gtmProjectName ?? project.gfsProjectCode}) ` +
+          `hat kein boardId (Task ${we.taskName}). OTT liefert für diesen Eintrag kein boardId in ` +
+          `assoBoardProjectCodes, daher kann der TimeEntry nicht via API angelegt werden.`,
+      )
+    }
+    return { issue, project }
+  }
+
+  /**
+   * Syncs the time entry for an export entry: skips it when OTT already holds the
+   * same hours, updates it when it exists with different hours, otherwise creates it.
+   */
+  private async syncTimeEntry(
+    we: WorkEntry,
+    day: string,
+    dateLogged: number,
+    issue: OttAssignedIssue,
+    project: OttProjectCode,
+    existing: OttTimeEntry | undefined,
+  ): Promise<void> {
+    // Identische Stunden -> kein POST (wie OTTzTalker), aber Comment wird trotzdem gesendet.
+    if (existing && existing.hoursLogged === we.hours) {
+      console.log(`Skip (Schon korrekt, ${we.hours}h): ${we.taskName} ${day}`)
+      return
+    }
+
+    // Update-Zweig: activityId wird NICHT gesendet (Referenz sendet es nicht,
+    // da es eine bestehende activityId sonst auf null setzen würde).
+    const response = existing
+      ? await this.apiRequest('POST', '/lean/wsr/protected/ott/updateTimeEntry', {
+          id: Number(existing.id),
+          ...this.timeEntryPayload(we, dateLogged, issue, project),
+        })
+      : await this.apiRequest('POST', '/lean/wsr/protected/ott/timeEntry', {
+          activityId: null,
+          ...this.timeEntryPayload(we, dateLogged, issue, project),
+        })
+
+    if (response?.status !== '0') {
+      throw new Error(
+        `OTT timeEntry fehlgeschlagen für ${we.taskName} (${day}): ${JSON.stringify(response)}`,
+      )
+    }
+  }
+
+  /**
+   * The payload shared by the create and update time-entry requests.
+   */
+  private timeEntryPayload(
+    we: WorkEntry,
+    dateLogged: number,
+    issue: OttAssignedIssue,
+    project: OttProjectCode,
+  ) {
+    return {
+      appointmentId: Number(we.taskIntId),
+      stickyNoteId: Number(issue.stickyNoteId),
+      dateLogged,
+      hoursLogged: we.hours,
+      description: '',
+      loggedFor: Number(this.userId),
+      trackingType: 1,
+      boardId: Number(project.boardId),
+      engagementId: Number(issue.engagementId),
+      issueName: we.taskName,
+      workLocationId: this.WORK_LOCATION_ID,
+      workPlaceId: this.WORK_PLACE_ID,
+    }
+  }
+
+  /**
+   * Writes the comment for an export entry to OTT (no-op when there is none).
+   */
+  private async writeComment(
+    we: WorkEntry,
+    day: string,
+    dateLogged: number,
+    issue: OttAssignedIssue,
+    usernameMagic: string,
+  ): Promise<void> {
+    if (!we.comment) return
+
+    const commentResponse = await this.apiRequest(
+      'POST',
+      `/lean/wsr/protected/ott/createOrUpdateOttStickyComment/${usernameMagic}`,
+      [
+        {
+          id: null,
+          userId: Number(this.userId),
+          stickyNoteId: Number(issue.stickyNoteId),
+          appointmentId: Number(we.taskIntId),
+          workLocationId: this.WORK_LOCATION_ID,
+          workPlaceId: this.WORK_PLACE_ID,
+          loggedDate: String(dateLogged),
+          comment: we.comment,
+        },
+      ],
+    )
+    if (commentResponse?.status !== '0') {
+      throw new Error(
+        `OTT Comment fehlgeschlagen für ${we.taskName} (${day}): ${JSON.stringify(commentResponse)}`,
+      )
+    }
   }
 
   /**
@@ -332,9 +453,9 @@ export class OTTIntegration extends PlatformIntegration {
     })
   }
 
- 
-/** 
-   *
+  /**
+   * Deletes every OTT time entry that lies inside the exported date range but is
+   * not part of the export anymore (stale entries), in a single batched request.
    * @param workLogData - der vom OTT gelieferte Bestand (Quelle der zu räumenden Einträge)
    * @param exportDays - der exportierte Tagbereich (leere Tage eingeschlossen)
    * @param desiredKeys - die (taskIntId,Tag)-Kombis, die in Zedd bleiben sollen
@@ -344,62 +465,17 @@ export class OTTIntegration extends PlatformIntegration {
     exportDays: Set<number>,
     desiredKeys: Set<string>,
   ): Promise<void> {
-    const toDelete: Array<{
-      id: number
-      appointmentId: number
-      stickyNoteId: number
-      dateLogged: number
-      hoursLogged: number
-      description: string
-      loggedFor: number
-      trackingType: number
-      boardId: number
-      engagementId: number
-      originalValues: Record<string, string | number>
-      workLocationId: number
-      workPlaceId: number
-      reason: string
-    }> = []
-    for (const te of workLogData.timeEntries) {
-      if (!exportDays.has(Number(te.dateLogged))) continue
-      const key = `${te.appointmentId}-${Number(te.dateLogged)}`
-      if (desiredKeys.has(key)) continue
-      if (Number(te.hoursLogged) === 0) continue
-      const dateLogged = Number(te.dateLogged)
-      const hoursLogged = Number(te.hoursLogged)
-      const loggedFor = Number(te.loggedFor) || Number(this.userId)
-      toDelete.push({
-        id: Number(te.id),
-        appointmentId: Number(te.appointmentId),
-        stickyNoteId: Number(te.stickyNoteId),
-        dateLogged,
-        hoursLogged,
-        description: te.description ?? '',
-        loggedFor,
-        trackingType: Number(te.trackingType),
-        boardId: Number(te.boardId),
-        engagementId: Number(te.engagementId),
-        // "Issue Id" ist die stickyNoteId (siehe OTT-Referenz-Payload).
-        originalValues: {
-          'Issue Name': te.issueName,
-          'Issue Id': Number(te.stickyNoteId),
-          Date: dateLogged,
-          Duration: hoursLogged,
-          Description: te.description ?? '',
-          'Logged For': loggedFor,
-          'Work Location': this.WORK_LOCATION_ID,
-          'Place of Work': this.WORK_PLACE_ID,
-        },
-        workLocationId: this.WORK_LOCATION_ID,
-        workPlaceId: this.WORK_PLACE_ID,
-        reason: 'Time booking adjustment.',
-      })
-    }
+    const toDelete = this.staleTimeEntries(workLogData, exportDays, desiredKeys)
     if (toDelete.length === 0) return
+
     console.log(
       `[OTT] Reconciliation: lösche insgesamt ${toDelete.length} verwaiste(n) OTT-Eintrag(e).`,
     )
-    const response = await this.deleteJson('/lean/wsr/protected/ott/deleteTimeEntry', toDelete)
+    const response = await this.apiRequest(
+      'DELETE',
+      '/lean/wsr/protected/ott/deleteTimeEntry',
+      toDelete.map((te) => this.buildDeleteEntry(te)),
+    )
     if (response?.status !== '0') {
       throw new Error(
         `OTT Reconciliation (deleteTimeEntry) fehlgeschlagen: ${JSON.stringify(response)}`,
@@ -407,28 +483,69 @@ export class OTTIntegration extends PlatformIntegration {
     }
   }
 
-  private async postJson(
-    path: string,
-    body: unknown,
-  ): Promise<{ status?: string; message?: string }> {
-    if (!this.authorizationHeader) {
-      throw new Error('No authorization header captured')
-    }
-    return this.page.evaluate(
-      async ({ path, auth, body }) => {
-        const response = await fetch(path, {
-          method: 'POST',
-          headers: { authorization: auth, 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify(body),
-        })
-        return response.json()
-      },
-      { path, auth: this.authorizationHeader, body },
-    )
+  /**
+   * The OTT time entries that are stale: inside the exported date range, no longer
+   * part of the export, and with a non-zero duration (zero-hour entries are left
+   * untouched, as OTT uses them as markers).
+   */
+  private staleTimeEntries(
+    workLogData: OttWorkLogData,
+    exportDays: Set<number>,
+    desiredKeys: Set<string>,
+  ): OttTimeEntry[] {
+    return workLogData.timeEntries.filter((te) => {
+      const dateLogged = Number(te.dateLogged)
+      if (!exportDays.has(dateLogged)) return false
+      if (desiredKeys.has(`${te.appointmentId}-${dateLogged}`)) return false
+      return Number(te.hoursLogged) !== 0
+    })
   }
 
-  private async deleteJson(
+  /**
+   * Maps a raw OTT time entry to the delete-request payload expected by OTT.
+   */
+  private buildDeleteEntry(te: OttTimeEntry): OttDeleteTimeEntry {
+    const dateLogged = Number(te.dateLogged)
+    const hoursLogged = Number(te.hoursLogged)
+    const loggedFor = Number(te.loggedFor) || Number(this.userId)
+    return {
+      id: Number(te.id),
+      appointmentId: Number(te.appointmentId),
+      stickyNoteId: Number(te.stickyNoteId),
+      dateLogged,
+      hoursLogged,
+      description: te.description ?? '',
+      loggedFor,
+      trackingType: Number(te.trackingType),
+      boardId: Number(te.boardId),
+      engagementId: Number(te.engagementId),
+      // "Issue Id" ist die stickyNoteId (siehe OTT-Referenz-Payload).
+      originalValues: {
+        'Issue Name': te.issueName,
+        'Issue Id': Number(te.stickyNoteId),
+        Date: dateLogged,
+        Duration: hoursLogged,
+        Description: te.description ?? '',
+        'Logged For': loggedFor,
+        'Work Location': this.WORK_LOCATION_ID,
+        'Place of Work': this.WORK_PLACE_ID,
+      },
+      workLocationId: this.WORK_LOCATION_ID,
+      workPlaceId: this.WORK_PLACE_ID,
+      reason: 'Time booking adjustment.',
+    }
+  }
+
+  /**
+   * Sends an HTTP request to the given OTT API with the body serialized as JSON.
+   * Tolerates empty or non-JSON responses by normalizing them to a status payload.
+   * @param method The HTTP method (e.g. 'POST', 'DELETE').
+   * @param path The OTT API endpoint to call.
+   * @param body The request payload, serialized to JSON.
+   * @returns The parsed (or normalized) JSON response.
+   */
+  private async apiRequest(
+    method: string,
     path: string,
     body: unknown,
   ): Promise<{ status?: string; message?: string }> {
@@ -436,9 +553,9 @@ export class OTTIntegration extends PlatformIntegration {
       throw new Error('No authorization header captured')
     }
     return this.page.evaluate(
-      async ({ path, auth, body }) => {
+      async ({ method, path, auth, body }) => {
         const response = await fetch(path, {
-          method: 'DELETE',
+          method,
           headers: { authorization: auth, 'Content-Type': 'application/json' },
           credentials: 'include',
           body: JSON.stringify(body),
@@ -453,9 +570,7 @@ export class OTTIntegration extends PlatformIntegration {
           return { status: response.ok ? '0' : String(response.status), message: text }
         }
       },
-      { path, auth: this.authorizationHeader, body },
+      { method, path, auth: this.authorizationHeader, body },
     )
   }
-
-
 }

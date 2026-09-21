@@ -1,35 +1,45 @@
 // Is the raw, unmapped return type from OTT.
 
-interface OttWorkLogResponse {
+export interface OttWorkLogResponse {
   data: OttWorkLogData[]
 }
 
-interface OttWorkLogData {
-  assignedIssues: OttAssignedIssue[] 
-  assoBoardProjectCodes: OttProjectCode[] 
-  timeEntries: OttTimeEntry[] 
+/**
+ * Lookups built from the OTT work log so export entries can be resolved against
+ * the known issues, projects and already-logged time entries.
+ */
+export interface OttExportMaps {
+  issueMap: Map<number, OttAssignedIssue>
+  projectMap: Map<number, OttProjectCode>
+  existingMap: Map<string, OttTimeEntry>
 }
 
-interface OttAssignedIssue {
+export interface OttWorkLogData {
+  assignedIssues: OttAssignedIssue[]
+  assoBoardProjectCodes: OttProjectCode[]
+  timeEntries: OttTimeEntry[]
+}
+
+export interface OttAssignedIssue {
   title: string
   appointmentId: number
-  projectCode: number 
-  engagementId: number 
+  projectCode: number
+  engagementId: number
   stickyNoteId: number
 }
 
-interface OttProjectCode {
+export interface OttProjectCode {
   projectCodeId: number
   gfsProjectCode: number
-  gtmProjectName: string 
+  gtmProjectName: string
   gfsTaskCode: string
   boardId?: number
 }
 
-interface OttTimeEntry {
+export interface OttTimeEntry {
   id: number
   appointmentId: number
-  dateLogged: number 
+  dateLogged: number
   hoursLogged: number
   stickyNoteId: number
   engagementId: number
@@ -42,8 +52,7 @@ interface OttTimeEntry {
   workPlaceId?: number
 }
 
-
-interface OttDeleteTimeEntry {
+export interface OttDeleteTimeEntry {
   id: number
   appointmentId: number
   stickyNoteId: number
