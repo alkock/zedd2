@@ -34,7 +34,7 @@ import {
   max as dateMax,
   min as dateMin,
 } from 'date-fns'
-import { constant, groupBy, remove, sortBy, uniqBy } from 'lodash'
+import { groupBy, remove, sortBy, uniqBy } from 'lodash'
 import { observer } from 'mobx-react-lite'
 import * as React from 'react'
 import { useRef, useState } from 'react'
