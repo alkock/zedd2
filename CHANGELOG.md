@@ -1,3 +1,10 @@
+## [Unreleased]
+
+- Feature: persistent zedd Chrome profile for imports/exports, so the Microsoft Single Sign On extension (2FA login) and logins are kept between runs; can be switched off and reset in the settings
+- Fix: Chrome wasn't found in the standard installation folders on Windows
+- Fix: an outdated Chrome path from an older zedd version is replaced with the installed Chrome on the first start after an update
+- Updated puppeteer to 25.16.0
+
 ## [3.1.0] - 2026-10-27
 
 - Feature: OTT export via the OTT API instead of UI automation: creates, updates and skips entries, deletes stale entries in the exported range, takes over the work location and writes comments

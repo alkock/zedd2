@@ -75,6 +75,14 @@ export class ZeddSettings {
   public chromeHeadless = false
 
   /**
+   * Use a persistent zedd Chrome profile, so extensions (Microsoft Single Sign On) and logins are
+   * kept between imports/exports. If false, every run starts with a fresh profile.
+   */
+  @observable
+  @serializable
+  public chromePersistentProfile = true
+
+  /**
    * mininum user idle time in minutes which counts as "user is away"
    */
   @observable

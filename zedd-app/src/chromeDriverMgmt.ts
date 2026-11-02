@@ -118,16 +118,58 @@ export const getChromeDriverVersion = async (chromeDriverPath = 'chromedriver') 
 }
 
 export const getNonEnvPathChromePath = async () => {
-  for (const path of [
-    'C:\\Program Files (x86)\\Google\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Users\\UserName\\AppDataLocal\\Google\\Chrome\\chrome.exe',
-    'C:\\Documents and Settings\\UserName\\Local Settings\\Application Data\\Google\\Chrome\\chrome.exe',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  ]) {
+  const winChrome = join('Google', 'Chrome', 'Application', 'chrome.exe')
+  const candidates = isWin
+    ? [
+        process.env['PROGRAMFILES'] ?? 'C:\\Program Files',
+        process.env['PROGRAMFILES(X86)'] ?? 'C:\\Program Files (x86)',
+        process.env['LOCALAPPDATA'],
+      ]
+        .filter((dir): dir is string => !!dir)
+        .map((dir) => join(dir, winChrome))
+    : ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
+  for (const path of candidates) {
     if (await fileExists(path)) {
       return path
     }
   }
   return undefined
+}
+
+const compareVersions = (a: string, b: string) => {
+  const pa = a.split('.').map((x) => parseInt(x) || 0)
+  const pb = b.split('.').map((x) => parseInt(x) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] ?? 0) - (pb[i] ?? 0)
+    if (diff !== 0) return diff
+  }
+  return 0
+}
+
+/**
+ * Checks a configured chrome path after an update of zedd. Returns the installed Chrome instead,
+ * if the configured one no longer exists, is a Chrome downloaded by puppeteer, or is older than
+ * the installed one. A configured path to an up-to-date Chrome is kept.
+ */
+export const migrateChromePath = async (chromePath: string): Promise<string> => {
+  if (!chromePath) {
+    return chromePath
+  }
+  const installedChrome = await getNonEnvPathChromePath()
+  if (!(await fileExists(chromePath)) || /[\\/]\.cache[\\/]puppeteer[\\/]/.test(chromePath)) {
+    return installedChrome ?? ''
+  }
+  if (!installedChrome || installedChrome === chromePath) {
+    return chromePath
+  }
+  try {
+    const [configuredVersion, installedVersion] = await Promise.all([
+      getChromeVersion(chromePath),
+      getChromeVersion(installedChrome),
+    ])
+    return compareVersions(configuredVersion, installedVersion) < 0 ? installedChrome : chromePath
+  } catch (e) {
+    console.error('Could not compare chrome versions', e)
+    return installedChrome
+  }
 }

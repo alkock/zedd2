@@ -60,6 +60,9 @@ export const SettingsDialog = observer(
         checking?: true
       },
     )
+    const [chromeProfileReset, setChromeProfileReset] = useState(
+      {} as { error?: any; ok?: true; resetting?: true },
+    )
     const [cgJiraStatus, setCgJiraStatus] = useState(
       {} as { error?: any; ok?: true; checking?: true },
     )
@@ -298,6 +301,44 @@ export const SettingsDialog = observer(
                 onChange={(_, checked) => (settings.chromeHeadless = !!checked)}
               />
               Background
+            </Grid>
+
+            <Grid size={{ xs: 4 }}>
+              <Tooltip title='A persistent profile keeps extensions (Microsoft Single Sign On) and logins between imports/exports.'>
+                <FormLabel>Chrome profile</FormLabel>
+              </Tooltip>
+            </Grid>
+            <Grid size={{ xs: 8 }}>
+              <label>
+                Temporary
+                <Switch
+                  checked={!!settings.chromePersistentProfile}
+                  onChange={(_, checked) => (settings.chromePersistentProfile = !!checked)}
+                />
+                Persistent (Microsoft SSO)
+              </label>
+              <Button
+                style={{ marginLeft: '1em' }}
+                disabled={!!chromeProfileReset.resetting}
+                onClick={async () => {
+                  setChromeProfileReset({ resetting: true })
+                  try {
+                    await platformState.resetChromeProfile()
+                    setChromeProfileReset({ ok: true })
+                  } catch (error) {
+                    setChromeProfileReset({ error })
+                  }
+                }}
+              >
+                Reset Chrome profile
+              </Button>
+              {chromeProfileReset.error ? (
+                <span style={{ color: theme.palette.error.main }}>
+                  {'' + chromeProfileReset.error}
+                </span>
+              ) : chromeProfileReset.ok ? (
+                <span style={{ color: theme.palette.success.main }}>Profile deleted.</span>
+              ) : null}
             </Grid>
 
             <Grid size={{ xs: 4 }}>

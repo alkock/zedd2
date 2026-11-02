@@ -11,6 +11,7 @@ import {
 } from '@electron/remote'
 import { BrowserWindow, ipcRenderer, MenuItemConstructorOptions, Rectangle } from 'electron'
 import { autorun, computed, configure as configureMobx, untracked } from 'mobx'
+import { promises as fsp } from 'fs'
 import * as path from 'path'
 import * as React from 'react'
 import 'win-ca' // use windows root certificates
@@ -34,6 +35,7 @@ import {
   getLatestChromeDriverVersion,
   getNonEnvPathChromePath,
   installChromeDriver,
+  migrateChromePath,
 } from './chromeDriverMgmt'
 import { suggestedTaskMenuItems } from './menuUtil'
 configureMobx({ enforceActions: 'never' })
@@ -44,6 +46,26 @@ const saveDir = path.join(app.getPath('home'), 'zedd')
 const platformDir = path.join(saveDir, 'platform')
 
 const userConfigFile = path.join(saveDir, 'zeddconfig.json')
+
+// Increase to give every user a fresh Chrome profile with the next update; older ones are deleted.
+const CHROME_PROFILE_VERSION = 1
+// LOCALAPPDATA on Windows, so the profile isn't synced with a roaming user profile
+const chromeProfileRoot =
+  process.platform === 'win32' && process.env['LOCALAPPDATA']
+    ? path.join(process.env['LOCALAPPDATA'], 'zedd')
+    : app.getPath('userData')
+const chromeProfileDir = path.join(chromeProfileRoot, `chrome-profile-v${CHROME_PROFILE_VERSION}`)
+
+const deleteOldChromeProfiles = async () => {
+  const entries = await fsp.readdir(chromeProfileRoot).catch(() => [] as string[])
+  for (const entry of entries) {
+    const match = /^chrome-profile-v(\d+)$/.exec(entry)
+    if (match && parseInt(match[1]) !== CHROME_PROFILE_VERSION) {
+      console.log('Deleting old chrome profile', entry)
+      await fsp.rm(path.join(chromeProfileRoot, entry), { recursive: true, force: true })
+    }
+  }
+}
 
 const d = (...x: any[]) => console.log('renderer.ts', ...x)
 
@@ -140,11 +162,16 @@ async function setup() {
 
   d('platformDir=' + platformDir)
   platformState.init()
+  platformState.chromeProfileDir = chromeProfileDir
+  deleteOldChromeProfiles().catch((error) =>
+    console.error('Could not delete old chrome profiles', error),
+  )
   autorun(() => {
     platformState.ottLink = config.ottLink
     platformState.repliconLink = config.repliconLink
     platformState.repliconActivity = config.repliconActivity
     platformState.chromeHeadless = config.chromeHeadless
+    platformState.chromePersistentProfile = config.chromePersistentProfile
     // untracked, so the import/export flags read in there don't re-trigger this autorun
     untracked(() => platformState.setIntegrationMap())
   })
@@ -206,7 +233,8 @@ async function setup() {
     )
   }
 
-  state.whatsNewDialogOpen = app.getVersion() !== state.whatsNewDialogLastOpenedForVersion
+  const isFirstStartAfterUpdate = app.getVersion() !== state.whatsNewDialogLastOpenedForVersion
+  state.whatsNewDialogOpen = isFirstStartAfterUpdate
   state.whatsNewDialogLastOpenedForVersion = app.getVersion()
 
   getTasksFromAssignedJiraIssues(platformState.tasks)
@@ -266,7 +294,21 @@ async function setup() {
     await platformState.setIntegrationMap()
     return { chromeVersion, chromeDriverVersion: requiredChromeDriverVersion }
   }
-  checkChromePath().catch((error) => state.addMessage(error.message))
+  // an older zedd version may have stored a path to an outdated Chrome, which is only
+  // re-detected when empty
+  const migrateChromePathAfterUpdate = async () => {
+    if (!isFirstStartAfterUpdate) return
+    const chromePath = await migrateChromePath(state.config.chromePath)
+    if (chromePath !== state.config.chromePath) {
+      console.log(`Replacing chrome path '${state.config.chromePath}' with '${chromePath}'`)
+      state.config.chromePath = chromePath
+      await state.config.saveToFile()
+    }
+  }
+  migrateChromePathAfterUpdate()
+    .catch((error) => console.error('Could not migrate chrome path', error))
+    .then(() => checkChromePath())
+    .catch((error) => state.addMessage(error.message))
 
   const boundsContained = (outer: Rectangle, inner: Rectangle, margin = 0) =>
     outer.x - inner.x <= margin &&

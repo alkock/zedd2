@@ -22,6 +22,10 @@ export abstract class PlatformIntegration {
       headless: this.options.headless,
       executablePath: this.options.executablePath,
       args: [`--window-size=${window.screen.availWidth},${window.screen.availHeight}`],
+      userDataDir: this.options.userDataDir || undefined,
+      // a persistent profile needs its extensions (Microsoft Single Sign On for the 2FA login),
+      // which puppeteer disables by default
+      ignoreDefaultArgs: this.options.userDataDir ? ['--disable-extensions'] : undefined,
       defaultViewport: {
         width: Math.round(window.screen.availWidth),
         height: Math.round(window.screen.availHeight * 0.9),

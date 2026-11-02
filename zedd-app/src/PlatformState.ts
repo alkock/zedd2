@@ -34,6 +34,13 @@ export class PlatformState {
 
   public chromeHeadless: boolean = false
 
+  public chromePersistentProfile: boolean = true
+
+  /**
+   * Directory of the persistent zedd Chrome profile, see {@link ZeddSettings.chromePersistentProfile}.
+   */
+  public chromeProfileDir: string = ''
+
   /**
    * The name of the "platform resource" you are filling out
    * timesheets for, i.e. yourself. this is only required
@@ -140,6 +147,7 @@ export class PlatformState {
     const options: PlatformOptions = {
       headless: this.chromeHeadless,
       executablePath: this.chromeExe,
+      userDataDir: this.chromePersistentProfile ? this.chromeProfileDir : undefined,
     }
 
     if (this.integrationMap) {
@@ -156,6 +164,23 @@ export class PlatformState {
       REPLICON: new RepliconIntegration(this.repliconLink, options),
       OTT: new OTTIntegration(this.ottLink, options),
     }
+  }
+
+  /**
+   * Deletes the persistent zedd Chrome profile (logins, installed extensions). It is created again
+   * on the next import/export.
+   */
+  public async resetChromeProfile(): Promise<void> {
+    if (this._currentlyExportingTasks || this._currentlyImportingTasks) {
+      throw new Error('Cannot reset the Chrome profile while an import/export is running.')
+    }
+    if (!this.chromeProfileDir) {
+      return
+    }
+    await Promise.all(
+      Object.values(this.integrationMap).map((integration) => integration.quitBrowser()),
+    )
+    await fsp.rm(this.chromeProfileDir, { recursive: true, force: true })
   }
 
   public async export(
